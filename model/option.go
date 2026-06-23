@@ -1,6 +1,7 @@
 package model
 
 import (
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -605,4 +606,33 @@ func handleConfigUpdate(key, value string) bool {
 	}
 
 	return true // 已处理
+}
+
+// LoadOrCreateSessionSecret loads SessionSecret from database or creates a new one
+func LoadOrCreateSessionSecret() {
+	// Only load from database if SESSION_SECRET environment variable is not set
+	if os.Getenv("SESSION_SECRET") != "" {
+		return
+	}
+
+	// Try to load from database
+	option := Option{Key: "SessionSecret"}
+	err := DB.Where("key = ?", "SessionSecret").First(&option).Error
+	if err == nil && option.Value != "" {
+		// Found in database, use it
+		common.SessionSecret = option.Value
+		common.SysLog("SessionSecret loaded from database")
+		return
+	}
+
+	// Not found in database, save the current one (generated in InitEnv)
+	err = DB.Create(&Option{
+		Key:   "SessionSecret",
+		Value: common.SessionSecret,
+	}).Error
+	if err != nil {
+		// Try to update if create fails (might already exist)
+		DB.Model(&Option{}).Where("key = ?", "SessionSecret").Update("value", common.SessionSecret)
+	}
+	common.SysLog("SessionSecret saved to database")
 }

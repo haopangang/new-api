@@ -292,6 +292,9 @@ func InitResources() error {
 	// Initialize options, should after model.InitDB()
 	model.InitOptionMap()
 
+	// Load or create SessionSecret from database
+	model.LoadOrCreateSessionSecret()
+
 	// 清理旧的磁盘缓存文件
 	common.CleanupOldCacheFiles()
 
