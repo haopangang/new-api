@@ -144,6 +144,20 @@ export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
       models: 'Models exposed by this channel',
     },
   },
+  59: {
+    id: 59,
+    name: CHANNEL_TYPES[59],
+    icon: 'mimo',
+    defaultBaseUrl: 'https://token-plan-cn.xiaomimimo.com',
+    hints: {
+      baseUrl:
+        'Default: https://token-plan-cn.xiaomimimo.com. Pay-as-you-go: https://api.xiaomimimo.com',
+      key: 'MiMo API Key (sk-... or tp-...)',
+      models: 'mimo-v2.5-pro,mimo-v2.5,mimo-v2-flash',
+      other:
+        'Supports both OpenAI (/v1) and Anthropic (/anthropic) relay formats',
+    },
+  },
 }
 
 /**
