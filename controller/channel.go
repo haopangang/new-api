@@ -1343,6 +1343,16 @@ type KeyStatus struct {
 
 // cleanKey removes special characters and attempts base64 decoding
 func cleanKey(key string) string {
+	// First, remove all non-base64 characters (including Chinese, Japanese, etc.)
+	// Only keep A-Z, a-z, 0-9, +, /, =
+	var cleaned strings.Builder
+	for _, c := range key {
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=' {
+			cleaned.WriteRune(c)
+		}
+	}
+	key = cleaned.String()
+
 	// Remove common special characters that users might accidentally include
 	key = strings.TrimSpace(key)
 	key = strings.Trim(key, "'\"`")
