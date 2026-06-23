@@ -1548,6 +1548,11 @@ func ManageMultiKeys(c *gin.Context) {
 			filteredKeyStatusList = allKeyStatusList
 		}
 
+		// Reverse the list to show newest keys first
+		for i, j := 0, len(filteredKeyStatusList)-1; i < j; i, j = i+1, j-1 {
+			filteredKeyStatusList[i], filteredKeyStatusList[j] = filteredKeyStatusList[j], filteredKeyStatusList[i]
+		}
+
 		// Calculate pagination based on filtered results
 		filteredTotal := len(filteredKeyStatusList)
 		totalPages := (filteredTotal + pageSize - 1) / pageSize
