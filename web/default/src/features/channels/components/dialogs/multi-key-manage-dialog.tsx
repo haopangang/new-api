@@ -376,6 +376,13 @@ export function MultiKeyManageDialog({
                     cell: (key) => `#${key.index + 1}`,
                   },
                   {
+                    id: 'key-preview',
+                    header: t('Key Preview'),
+                    className: 'min-w-[200px]',
+                    cellClassName: 'font-mono text-sm',
+                    cell: (key) => key.key_preview || '-',
+                  },
+                  {
                     id: 'status',
                     header: t('Status'),
                     className: 'w-32',

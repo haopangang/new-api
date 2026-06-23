@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -1340,6 +1341,87 @@ type KeyStatus struct {
 	KeyPreview   string `json:"key_preview"` // first 10 chars of key for identification
 }
 
+// cleanKey removes special characters and attempts base64 decoding
+func cleanKey(key string) string {
+	// Remove common special characters that users might accidentally include
+	key = strings.TrimSpace(key)
+	key = strings.Trim(key, "'\"`")
+	key = strings.ReplaceAll(key, "\r", "")
+	key = strings.ReplaceAll(key, "\n", "")
+	key = strings.ReplaceAll(key, "\t", "")
+	key = strings.ReplaceAll(key, " ", "")
+
+	// Check if the key looks like base64 encoded
+	if isBase64Encoded(key) {
+		decoded, err := base64.StdEncoding.DecodeString(key)
+		if err == nil {
+			decodedStr := string(decoded)
+			// Verify the decoded string looks like a valid key
+			if isValidKeyFormat(decodedStr) {
+				return decodedStr
+			}
+		}
+	}
+
+	return key
+}
+
+// isBase64Encoded checks if a string appears to be base64 encoded
+func isBase64Encoded(s string) bool {
+	// Base64 encoded strings have these characteristics:
+	// 1. Length is a multiple of 4
+	// 2. Contains only A-Z, a-z, 0-9, +, /, =
+	// 3. Has padding (=) at the end if needed
+	if len(s) == 0 || len(s)%4 != 0 {
+		return false
+	}
+
+	// Check if all characters are valid base64 characters
+	for _, c := range s {
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=') {
+			return false
+		}
+	}
+
+	// Check padding
+	paddingCount := 0
+	for i := len(s) - 1; i >= 0 && s[i] == '='; i-- {
+		paddingCount++
+	}
+	if paddingCount > 2 {
+		return false
+	}
+
+	// Check if padding is only at the end
+	for i := 0; i < len(s)-paddingCount; i++ {
+		if s[i] == '=' {
+			return false
+		}
+	}
+
+	return true
+}
+
+// isValidKeyFormat checks if a string looks like a valid API key
+func isValidKeyFormat(s string) bool {
+	// A valid key should:
+	// 1. Not be empty
+	// 2. Have reasonable length (at least 8 characters)
+	// 3. Contain printable characters
+	// 4. Not contain control characters
+	if len(s) < 8 {
+		return false
+	}
+
+	for _, c := range s {
+		if c < 32 || c > 126 {
+			return false
+		}
+	}
+
+	return true
+}
+
 // ManageMultiKeys handles multi-key management operations
 func ManageMultiKeys(c *gin.Context) {
 	request := MultiKeyManageRequest{}
@@ -1429,10 +1511,10 @@ func ManageMultiKeys(c *gin.Context) {
 				}
 			}
 
-			// Create key preview (first 10 chars)
+			// Create key preview (first 10 chars + ... + last 10 chars)
 			keyPreview := key
-			if len(key) > 10 {
-				keyPreview = key[:10] + "..."
+			if len(key) > 25 {
+				keyPreview = key[:10] + "..." + key[len(key)-10:]
 			}
 
 			allKeyStatusList = append(allKeyStatusList, KeyStatus{
@@ -1843,6 +1925,23 @@ func ManageMultiKeys(c *gin.Context) {
 			return
 		}
 
+		// Clean keys: remove special characters and handle base64
+		var cleanedKeys []string
+		for _, key := range newKeys {
+			cleaned := cleanKey(key)
+			if cleaned != "" {
+				cleanedKeys = append(cleanedKeys, cleaned)
+			}
+		}
+
+		if len(cleanedKeys) == 0 {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "清理后未找到有效的密钥",
+			})
+			return
+		}
+
 		// Get existing keys
 		existingKeys := channel.GetKeys()
 
@@ -1858,7 +1957,7 @@ func ManageMultiKeys(c *gin.Context) {
 		// Filter out duplicates from new keys
 		var addedCount int
 		var dedupedNewKeys []string
-		for _, key := range newKeys {
+		for _, key := range cleanedKeys {
 			normalized := strings.TrimSpace(key)
 			if normalized == "" {
 				continue
