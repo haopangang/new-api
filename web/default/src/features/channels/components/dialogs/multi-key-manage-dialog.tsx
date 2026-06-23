@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useState, useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Loader2, RefreshCw, Trash2, Power, PowerOff } from 'lucide-react'
+import { Loader2, Plus, RefreshCw, Trash2, Power, PowerOff } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -56,6 +56,7 @@ import type { KeyStatus, MultiKeyConfirmAction } from '../../types'
 import { useChannels } from '../channels-provider'
 import { StatisticsCard } from './multi-key-statistics-card'
 import { MultiKeyTableRowActions } from './multi-key-table-row-actions'
+import { AddKeysDialog } from './add-keys-dialog'
 
 type MultiKeyManageDialogProps = {
   open: boolean
@@ -86,6 +87,7 @@ export function MultiKeyManageDialog({
   const [confirmAction, setConfirmAction] =
     useState<MultiKeyConfirmAction | null>(null)
   const [isPerformingAction, setIsPerformingAction] = useState(false)
+  const [showAddKeysDialog, setShowAddKeysDialog] = useState(false)
 
   // Reset and load data when dialog opens
   useEffect(() => {
@@ -305,6 +307,15 @@ export function MultiKeyManageDialog({
                 <RefreshCw className='h-4 w-4' />
               </Button>
 
+              <Button
+                variant='default'
+                size='sm'
+                onClick={() => setShowAddKeysDialog(true)}
+              >
+                <Plus className='mr-2 h-4 w-4' />
+                {t('Add Keys')}
+              </Button>
+
               {manualDisabledCount + autoDisabledCount > 0 && (
                 <Button
                   variant='default'
@@ -443,6 +454,16 @@ export function MultiKeyManageDialog({
         isLoading={isPerformingAction}
         handleConfirm={performAction}
       />
+
+      {/* Add Keys Dialog */}
+      {currentRow && (
+        <AddKeysDialog
+          open={showAddKeysDialog}
+          onOpenChange={setShowAddKeysDialog}
+          channelId={currentRow.id}
+          onSuccess={() => loadKeyStatus()}
+        />
+      )}
     </>
   )
 }
