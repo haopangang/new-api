@@ -223,11 +223,26 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		if newAPIError == nil {
 			relayInfo.LastError = nil
+			// 成功时重置 429 计数
+			if channel.ChannelInfo.IsMultiKey {
+				keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
+				if keyIndex >= 0 {
+					channel.ResetKey429Count(keyIndex)
+				}
+			}
 			return
 		}
 
 		newAPIError = service.NormalizeViolationFeeError(newAPIError)
 		relayInfo.LastError = newAPIError
+
+		// 429 冷却记录
+		if newAPIError.StatusCode == http.StatusTooManyRequests && channel.ChannelInfo.IsMultiKey {
+			keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
+			if keyIndex >= 0 {
+				channel.RecordKeyCooldown(keyIndex, newAPIError.RetryAfter)
+			}
+		}
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 
@@ -550,6 +565,13 @@ func RelayTask(c *gin.Context) {
 
 		result, taskErr = relay.RelayTaskSubmit(c, relayInfo)
 		if taskErr == nil {
+			// 成功时重置 429 计数
+			if channel.ChannelInfo.IsMultiKey {
+				keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
+				if keyIndex >= 0 {
+					channel.ResetKey429Count(keyIndex)
+				}
+			}
 			break
 		}
 
@@ -558,6 +580,14 @@ func RelayTask(c *gin.Context) {
 				*types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey,
 					common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()),
 				types.NewOpenAIError(taskErr.Error, types.ErrorCodeBadResponseStatusCode, taskErr.StatusCode))
+		}
+
+		// 429 冷却记录
+		if taskErr.StatusCode == http.StatusTooManyRequests && channel.ChannelInfo.IsMultiKey {
+			keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
+			if keyIndex >= 0 {
+				channel.RecordKeyCooldown(keyIndex, 0) // Task relay 无 RetryAfter，使用默认退避
+			}
 		}
 
 		if !shouldRetryTaskRelay(c, channel.Id, taskErr, common.RetryTimes-retryParam.GetRetry()) {

@@ -96,6 +96,7 @@ type NewAPIError struct {
 	errorCode      ErrorCode
 	StatusCode     int
 	Metadata       json.RawMessage
+	RetryAfter     int // 从 429 响应的 Retry-After header 提取（秒），0 表示未设置
 }
 
 // Unwrap enables errors.Is / errors.As to work with NewAPIError by exposing the underlying error.

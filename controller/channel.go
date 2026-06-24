@@ -1331,6 +1331,7 @@ type MultiKeyStatusResponse struct {
 	EnabledCount        int `json:"enabled_count"`
 	ManualDisabledCount int `json:"manual_disabled_count"`
 	AutoDisabledCount   int `json:"auto_disabled_count"`
+	CoolingDownCount    int `json:"cooling_down_count"`
 }
 
 type KeyStatus struct {
@@ -1490,7 +1491,7 @@ func ManageMultiKeys(c *gin.Context) {
 		}
 
 		// Statistics for all keys (unchanged by filtering)
-		var enabledCount, manualDisabledCount, autoDisabledCount int
+		var enabledCount, manualDisabledCount, autoDisabledCount, coolingDownCount int
 
 		// Build all key status data first
 		var allKeyStatusList []KeyStatus
@@ -1505,6 +1506,18 @@ func ManageMultiKeys(c *gin.Context) {
 				}
 			}
 
+			// 如果 enabled，检查是否在 429 冷却期
+			if status == 1 && channel.ChannelInfo.MultiKeyCooldownUntil != nil {
+				if until, exists := channel.ChannelInfo.MultiKeyCooldownUntil[i]; exists {
+					now := time.Now().Unix()
+					if now < until {
+						status = 4 // cooling down (纯展示，不写入 MultiKeyStatusList)
+						reason = fmt.Sprintf("429 限流冷却中，%d 秒后恢复", until-now)
+						disabledTime = until
+					}
+				}
+			}
+
 			// Count for statistics (all keys)
 			switch status {
 			case 1:
@@ -1513,9 +1526,11 @@ func ManageMultiKeys(c *gin.Context) {
 				manualDisabledCount++
 			case 3:
 				autoDisabledCount++
+			case 4:
+				coolingDownCount++
 			}
 
-			if status != 1 {
+			if status != 1 && status != 4 {
 				if channel.ChannelInfo.MultiKeyDisabledTime != nil {
 					disabledTime = channel.ChannelInfo.MultiKeyDisabledTime[i]
 				}
@@ -1591,6 +1606,7 @@ func ManageMultiKeys(c *gin.Context) {
 				EnabledCount:        enabledCount,        // Overall statistics
 				ManualDisabledCount: manualDisabledCount, // Overall statistics
 				AutoDisabledCount:   autoDisabledCount,   // Overall statistics
+				CoolingDownCount:    coolingDownCount,    // Overall statistics
 			},
 		})
 		return

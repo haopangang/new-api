@@ -152,6 +152,11 @@ var PreConsumedQuota = 500
 
 var RetryTimes = 0
 
+// MultiKeyCooldown 429 冷却机制配置
+var MultiKeyCooldownEnabled = true  // 是否启用 429 冷却
+var MultiKeyCooldownBaseSec = 5     // 基础冷却秒数
+var MultiKeyCooldownMaxSec = 120    // 最大冷却秒数
+
 //var RootUserEmail = ""
 
 var IsMasterNode bool

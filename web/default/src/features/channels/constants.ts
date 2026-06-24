@@ -156,6 +156,7 @@ export const MULTI_KEY_STATUS = {
   ENABLED: 1,
   MANUAL_DISABLED: 2,
   AUTO_DISABLED: 3,
+  COOLING_DOWN: 4,
 } as const
 
 export const MULTI_KEY_STATUS_LABELS = {
@@ -176,6 +177,10 @@ export const MULTI_KEY_STATUS_CONFIG = {
   [MULTI_KEY_STATUS.AUTO_DISABLED]: {
     variant: 'danger' as const,
     label: 'Auto Disabled',
+  },
+  [MULTI_KEY_STATUS.COOLING_DOWN]: {
+    variant: 'warning' as const,
+    label: 'Cooling Down',
   },
 }
 
@@ -206,6 +211,7 @@ export const MULTI_KEY_FILTER_OPTIONS = [
   { value: '1', label: 'Enabled' },
   { value: '2', label: 'Manual Disabled' },
   { value: '3', label: 'Auto Disabled' },
+  { value: '4', label: 'Cooling Down' },
 ] as const
 
 export const MULTI_KEY_CONFIRM_MESSAGES = {

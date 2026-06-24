@@ -81,6 +81,7 @@ export function MultiKeyManageDialog({
   const [enabledCount, setEnabledCount] = useState(0)
   const [manualDisabledCount, setManualDisabledCount] = useState(0)
   const [autoDisabledCount, setAutoDisabledCount] = useState(0)
+  const [coolingDownCount, setCoolingDownCount] = useState(0)
 
   // UI state
   const [statusFilter, setStatusFilter] = useState<number | null>(null)
@@ -124,6 +125,7 @@ export function MultiKeyManageDialog({
         setEnabledCount(response.data.enabled_count || 0)
         setManualDisabledCount(response.data.manual_disabled_count || 0)
         setAutoDisabledCount(response.data.auto_disabled_count || 0)
+        setCoolingDownCount(response.data.cooling_down_count || 0)
       } else {
         toast.error(response.message || t('Failed to load key status'))
       }
@@ -251,7 +253,7 @@ export function MultiKeyManageDialog({
       >
         <div className='flex min-h-0 flex-1 flex-col space-y-4 overflow-hidden'>
           {/* Statistics */}
-          <div className='grid shrink-0 grid-cols-3 gap-3'>
+          <div className='grid shrink-0 grid-cols-4 gap-3'>
             <StatisticsCard
               label={t('Enabled')}
               count={enabledCount}
@@ -265,6 +267,11 @@ export function MultiKeyManageDialog({
             <StatisticsCard
               label={t('Auto Disabled')}
               count={autoDisabledCount}
+              total={total}
+            />
+            <StatisticsCard
+              label={t('Cooling Down')}
+              count={coolingDownCount}
               total={total}
             />
           </div>

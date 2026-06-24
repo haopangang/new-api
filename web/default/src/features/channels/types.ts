@@ -242,6 +242,7 @@ export interface MultiKeyStatusResponse {
     enabled_count: number
     manual_disabled_count: number
     auto_disabled_count: number
+    cooling_down_count: number
   }
 }
 

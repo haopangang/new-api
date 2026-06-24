@@ -67,6 +67,7 @@ type ChannelTestMode = (typeof channelTestModes)[number]
 const routingReliabilitySchema = z
   .object({
     RetryTimes: z.coerce.number().min(0).max(10),
+    MultiKeyCooldownEnabled: z.boolean(),
     ChannelDisableThreshold: numericString,
     AutomaticDisableChannelEnabled: z.boolean(),
     AutomaticEnableChannelEnabled: z.boolean(),
@@ -116,6 +117,7 @@ type RoutingReliabilityFormInput = z.input<typeof routingReliabilitySchema>
 type RoutingReliabilitySectionProps = {
   defaultValues: {
     RetryTimes: number
+    MultiKeyCooldownEnabled: boolean
     ChannelDisableThreshold: string
     AutomaticDisableChannelEnabled: boolean
     AutomaticEnableChannelEnabled: boolean
@@ -134,6 +136,7 @@ function normalizeLineEndings(value: string) {
 
 type NormalizedRoutingReliabilityValues = {
   RetryTimes: number
+  MultiKeyCooldownEnabled: boolean
   ChannelDisableThreshold: string
   AutomaticDisableChannelEnabled: boolean
   AutomaticEnableChannelEnabled: boolean
@@ -153,6 +156,7 @@ const buildFormDefaults = (
   defaults: RoutingReliabilitySectionProps['defaultValues']
 ): RoutingReliabilityFormInput => ({
   RetryTimes: defaults.RetryTimes ?? 0,
+  MultiKeyCooldownEnabled: defaults.MultiKeyCooldownEnabled ?? true,
   ChannelDisableThreshold: defaults.ChannelDisableThreshold ?? '',
   AutomaticDisableChannelEnabled: defaults.AutomaticDisableChannelEnabled,
   AutomaticEnableChannelEnabled: defaults.AutomaticEnableChannelEnabled,
@@ -176,6 +180,7 @@ const normalizeDefaults = (
   defaults: RoutingReliabilitySectionProps['defaultValues']
 ): NormalizedRoutingReliabilityValues => ({
   RetryTimes: defaults.RetryTimes ?? 0,
+  MultiKeyCooldownEnabled: defaults.MultiKeyCooldownEnabled ?? true,
   ChannelDisableThreshold: (defaults.ChannelDisableThreshold ?? '').trim(),
   AutomaticDisableChannelEnabled: defaults.AutomaticDisableChannelEnabled,
   AutomaticEnableChannelEnabled: defaults.AutomaticEnableChannelEnabled,
@@ -201,6 +206,7 @@ const normalizeFormValues = (
   values: RoutingReliabilityFormValues
 ): NormalizedRoutingReliabilityValues => ({
   RetryTimes: values.RetryTimes,
+  MultiKeyCooldownEnabled: values.MultiKeyCooldownEnabled,
   ChannelDisableThreshold: values.ChannelDisableThreshold.trim(),
   AutomaticDisableChannelEnabled: values.AutomaticDisableChannelEnabled,
   AutomaticEnableChannelEnabled: values.AutomaticEnableChannelEnabled,
@@ -309,6 +315,26 @@ export function RoutingReliabilitySection({
                     </FormControl>
                     <FormDescription>
                       {t('Number of times to retry failed requests (0-10)')}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name='MultiKeyCooldownEnabled'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('429 Key Cooldown')}</FormLabel>
+                    <FormControl>
+                      <Switch
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t('When enabled, keys that receive 429 rate limit errors will be temporarily cooled down')}
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
