@@ -3,10 +3,12 @@ package model
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -16,17 +18,130 @@ import (
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 )
 
-var group2model2channels map[string]map[string][]int // enabled channel
-var channelsIDM map[int]*Channel                     // all channels include disabled
-// channel2advancedCustomConfig caches parsed Advanced Custom (type 58) configs so
-// path-aware selection avoids re-parsing JSON per request. Refreshed on full sync.
-var channel2advancedCustomConfig map[int]*dto.AdvancedCustomConfig
-var channelSyncLock sync.RWMutex
+// channelCacheSnapshot is an immutable snapshot of the channel cache.
+// All map/slice fields are read-only after creation, so concurrent access
+// is safe without locks. Channel pointer fields may be mutated by admin
+// operations (CacheUpdateChannel/CacheUpdateChannelStatus) but those are
+// infrequent and protected by channelCacheMu.
+type channelCacheSnapshot struct {
+	// group -> model -> channel IDs sorted by priority (descending)
+	group2model2channels map[string]map[string][]int
+	// channel ID -> Channel (all channels, including disabled)
+	channelsIDM map[int]*Channel
+	// channel ID -> parsed Advanced Custom config
+	advancedCustomConfig map[int]*dto.AdvancedCustomConfig
+	// channel ID -> priority groups (pre-sorted, highest first).
+	// Each entry is a slice of priority tiers, where each tier contains
+	// channel IDs at that priority level. Built during InitChannelCache
+	// to eliminate per-request sorting and map allocation in the hot path.
+	priorityGroups map[int][][]int
+}
+
+var (
+	// channelCachePtr holds the current immutable snapshot.
+	// Readers load this atomically; writers swap it under channelCacheMu.
+	channelCachePtr atomic.Pointer[channelCacheSnapshot]
+
+	// channelCacheMu protects snapshot rebuilds in CacheUpdateChannel and
+	// CacheUpdateChannelStatus. InitChannelCache does NOT hold this lock
+	// during the expensive DB+build phase — it only holds it briefly for
+	// the final pointer swap.
+	channelCacheMu sync.RWMutex
+)
+
+// loadSnapshot returns the current cache snapshot. The read lock is held
+// only for the atomic pointer load (nanoseconds), then released immediately.
+// All subsequent reads work on the immutable snapshot without any lock.
+func loadSnapshot() *channelCacheSnapshot {
+	channelCacheMu.RLock()
+	s := channelCachePtr.Load()
+	channelCacheMu.RUnlock()
+	return s
+}
+
+// buildPriorityGroups pre-computes priority tiers for each (group, model) pair.
+// The result maps a channel ID to a [][]int where index i contains all channel
+// IDs at the i-th highest priority. This eliminates per-request sorting.
+func buildPriorityGroups(g2m2c map[string]map[string][]int, idm map[int]*Channel) map[int][][]int {
+	// Collect unique (group, model) pairs and build a lookup key.
+	// We use a single flat map keyed by a hash of (group, model).
+	type groupModel struct {
+		group string
+		model string
+	}
+	seen := make(map[groupModel][][]int)
+
+	for group, m2c := range g2m2c {
+		for model, chIDs := range m2c {
+			gm := groupModel{group, model}
+			if _, ok := seen[gm]; ok {
+				continue
+			}
+			seen[gm] = buildPriorityTiers(chIDs, idm)
+		}
+	}
+
+	// Map each channel ID to its priority tiers. All channels in the same
+	// (group, model) pair share the same tiers.
+	result := make(map[int][][]int, len(idm))
+	for _, tiers := range seen {
+		for _, tier := range tiers {
+			for _, id := range tier {
+				if _, ok := result[id]; !ok {
+					result[id] = tiers
+				}
+			}
+		}
+	}
+	return result
+}
+
+// buildPriorityTiers groups channel IDs by priority (descending).
+// Returns a slice of tiers where each tier contains channel IDs at the same priority.
+func buildPriorityTiers(chIDs []int, idm map[int]*Channel) [][]int {
+	if len(chIDs) == 0 {
+		return nil
+	}
+
+	// Collect unique priorities
+	prioritySet := make(map[int64]bool, 4)
+	for _, id := range chIDs {
+		if ch, ok := idm[id]; ok {
+			prioritySet[ch.GetPriority()] = true
+		}
+	}
+
+	// Sort priorities descending
+	priorities := make([]int, 0, len(prioritySet))
+	for p := range prioritySet {
+		priorities = append(priorities, int(p))
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(priorities)))
+
+	// Build tiers
+	tiers := make([][]int, len(priorities))
+	for i, priority := range priorities {
+		tier := make([]int, 0, len(chIDs)/len(priorities)+1)
+		for _, id := range chIDs {
+			if ch, ok := idm[id]; ok && int(ch.GetPriority()) == priority {
+				tier = append(tier, id)
+			}
+		}
+		tiers[i] = tier
+	}
+	return tiers
+}
 
 func InitChannelCache() {
 	if !common.MemoryCacheEnabled {
 		return
 	}
+
+	// Load current snapshot for preserving polling index state.
+	// This is safe without the write lock because we only read the old
+	// snapshot's channelsIDM to copy polling indexes.
+	oldSnapshot := channelCachePtr.Load()
+
 	newChannelId2channel := make(map[int]*Channel)
 	newChannel2advancedCustomConfig := make(map[int]*dto.AdvancedCustomConfig)
 	var channels []*Channel
@@ -39,6 +154,23 @@ func InitChannelCache() {
 			}
 		}
 	}
+
+	// Preserve multi-key polling index from old snapshot
+	for id, channel := range newChannelId2channel {
+		if channel.ChannelInfo.IsMultiKey {
+			channel.Keys = channel.GetKeys()
+			if channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModePolling {
+				if oldSnapshot != nil {
+					if oldChannel, ok := oldSnapshot.channelsIDM[id]; ok {
+						if oldChannel.ChannelInfo.IsMultiKey && oldChannel.ChannelInfo.MultiKeyMode == constant.MultiKeyModePolling {
+							channel.ChannelInfo.MultiKeyPollingIndex = oldChannel.ChannelInfo.MultiKeyPollingIndex
+						}
+					}
+				}
+			}
+		}
+	}
+
 	var abilities []*Ability
 	DB.Find(&abilities)
 	groups := make(map[string]bool)
@@ -65,7 +197,7 @@ func InitChannelCache() {
 		}
 	}
 
-	// sort by priority
+	// sort by priority (descending)
 	for group, model2channels := range newGroup2model2channels {
 		for model, channels := range model2channels {
 			sort.Slice(channels, func(i, j int) bool {
@@ -75,25 +207,23 @@ func InitChannelCache() {
 		}
 	}
 
-	channelSyncLock.Lock()
-	group2model2channels = newGroup2model2channels
-	//channelsIDM = newChannelId2channel
-	for i, channel := range newChannelId2channel {
-		if channel.ChannelInfo.IsMultiKey {
-			channel.Keys = channel.GetKeys()
-			if channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModePolling {
-				if oldChannel, ok := channelsIDM[i]; ok {
-					// 存在旧的渠道，如果是多key且轮询，保留轮询索引信息
-					if oldChannel.ChannelInfo.IsMultiKey && oldChannel.ChannelInfo.MultiKeyMode == constant.MultiKeyModePolling {
-						channel.ChannelInfo.MultiKeyPollingIndex = oldChannel.ChannelInfo.MultiKeyPollingIndex
-					}
-				}
-			}
-		}
+	// Pre-compute priority groups for the hot path
+	priorityGroups := buildPriorityGroups(newGroup2model2channels, newChannelId2channel)
+
+	// Build the new immutable snapshot
+	newSnapshot := &channelCacheSnapshot{
+		group2model2channels: newGroup2model2channels,
+		channelsIDM:          newChannelId2channel,
+		advancedCustomConfig: newChannel2advancedCustomConfig,
+		priorityGroups:       priorityGroups,
 	}
-	channelsIDM = newChannelId2channel
-	channel2advancedCustomConfig = newChannel2advancedCustomConfig
-	channelSyncLock.Unlock()
+
+	// Atomic swap — readers see the new snapshot immediately.
+	// Hold the write lock briefly to serialize with CacheUpdateChannel.
+	channelCacheMu.Lock()
+	channelCachePtr.Store(newSnapshot)
+	channelCacheMu.Unlock()
+
 	common.SysLog("channels synced from database")
 }
 
@@ -105,22 +235,27 @@ func SyncChannelCache(frequency int) {
 	}
 }
 
+// GetRandomSatisfiedChannel selects a weighted-random channel for the given
+// group, model, and retry count. The hot path uses pre-computed priority tiers
+// to avoid per-request sorting and map allocation.
 func GetRandomSatisfiedChannel(group string, model string, retry int, requestPath string) (*Channel, error) {
 	// if memory cache is disabled, get channel directly from database
 	if !common.MemoryCacheEnabled {
 		return GetChannel(group, model, retry, requestPath)
 	}
 
-	channelSyncLock.RLock()
-	defer channelSyncLock.RUnlock()
+	snap := loadSnapshot()
+	if snap == nil {
+		return nil, nil
+	}
 
 	// First, try to find channels with the exact model name.
-	channels := filterChannelsByRequestPath(group2model2channels[group][model], requestPath)
+	channels := filterChannelsByRequestPath(snap, snap.group2model2channels[group][model], requestPath)
 
 	// If no channels found, try to find channels with the normalized model name.
 	if len(channels) == 0 {
 		normalizedModel := ratio_setting.FormatMatchingModelName(model)
-		channels = filterChannelsByRequestPath(group2model2channels[group][normalizedModel], requestPath)
+		channels = filterChannelsByRequestPath(snap, snap.group2model2channels[group][normalizedModel], requestPath)
 	}
 
 	if len(channels) == 0 {
@@ -128,15 +263,49 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 	}
 
 	if len(channels) == 1 {
-		if channel, ok := channelsIDM[channels[0]]; ok {
+		if channel, ok := snap.channelsIDM[channels[0]]; ok {
 			return channel, nil
 		}
 		return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channels[0])
 	}
 
+	// Use pre-computed priority tiers from the snapshot.
+	// Look up the first channel's tiers (all channels in the same (group, model)
+	// share the same priority tiers).
+	tiers := snap.priorityGroups[channels[0]]
+	if len(tiers) == 0 {
+		// Fallback: build tiers on the fly (should not happen after InitChannelCache)
+		return getSatisfiedChannelFallback(snap, channels, retry, group, model)
+	}
+
+	if retry >= len(tiers) {
+		retry = len(tiers) - 1
+	}
+	targetTier := tiers[retry]
+
+	// Collect channels in the target priority tier
+	var sumWeight int
+	targetChannels := make([]*Channel, 0, len(targetTier))
+	for _, channelId := range targetTier {
+		if channel, ok := snap.channelsIDM[channelId]; ok {
+			sumWeight += channel.GetWeight()
+			targetChannels = append(targetChannels, channel)
+		}
+	}
+
+	if len(targetChannels) == 0 {
+		return nil, fmt.Errorf("no channel found, group: %s, model: %s, retry: %d", group, model, retry)
+	}
+
+	return selectByWeight(targetChannels, sumWeight)
+}
+
+// getSatisfiedChannelFallback handles the case where priority tiers are not
+// pre-computed. This is a safety net and should rarely be reached.
+func getSatisfiedChannelFallback(snap *channelCacheSnapshot, channels []int, retry int, group, model string) (*Channel, error) {
 	uniquePriorities := make(map[int]bool)
 	for _, channelId := range channels {
-		if channel, ok := channelsIDM[channelId]; ok {
+		if channel, ok := snap.channelsIDM[channelId]; ok {
 			uniquePriorities[int(channel.GetPriority())] = true
 		} else {
 			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
@@ -153,11 +322,10 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 	}
 	targetPriority := int64(sortedUniquePriorities[retry])
 
-	// get the priority for the given retry number
-	var sumWeight = 0
+	var sumWeight int
 	var targetChannels []*Channel
 	for _, channelId := range channels {
-		if channel, ok := channelsIDM[channelId]; ok {
+		if channel, ok := snap.channelsIDM[channelId]; ok {
 			if channel.GetPriority() == targetPriority {
 				sumWeight += channel.GetWeight()
 				targetChannels = append(targetChannels, channel)
@@ -168,37 +336,33 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 	}
 
 	if len(targetChannels) == 0 {
-		return nil, errors.New(fmt.Sprintf("no channel found, group: %s, model: %s, priority: %d", group, model, targetPriority))
+		return nil, fmt.Errorf("no channel found, group: %s, model: %s, priority: %d", group, model, targetPriority)
 	}
 
-	// smoothing factor and adjustment
+	return selectByWeight(targetChannels, sumWeight)
+}
+
+// selectByWeight performs weighted random selection among channels.
+func selectByWeight(targetChannels []*Channel, sumWeight int) (*Channel, error) {
 	smoothingFactor := 1
 	smoothingAdjustment := 0
 
 	if sumWeight == 0 {
-		// when all channels have weight 0, set sumWeight to the number of channels and set smoothing adjustment to 100
-		// each channel's effective weight = 100
 		sumWeight = len(targetChannels) * 100
 		smoothingAdjustment = 100
 	} else if sumWeight/len(targetChannels) < 10 {
-		// when the average weight is less than 10, set smoothing factor to 100
 		smoothingFactor = 100
 	}
 
-	// Calculate the total weight of all channels up to endIdx
 	totalWeight := sumWeight * smoothingFactor
-
-	// Generate a random value in the range [0, totalWeight)
 	randomWeight := rand.Intn(totalWeight)
 
-	// Find a channel based on its weight
 	for _, channel := range targetChannels {
 		randomWeight -= channel.GetWeight()*smoothingFactor + smoothingAdjustment
 		if randomWeight < 0 {
 			return channel, nil
 		}
 	}
-	// return null if no channel is not found
 	return nil, errors.New("channel not found")
 }
 
@@ -206,14 +370,13 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 // Custom (type 58) channels are path-checked: they are kept only when one of their
 // configured routes matches requestPath. All other channel types always pass.
 // When requestPath is empty (non-relay callers) filtering is skipped.
-// Caller must hold channelSyncLock (read lock). The cached slice is never mutated.
-func filterChannelsByRequestPath(channels []int, requestPath string) []int {
+func filterChannelsByRequestPath(snap *channelCacheSnapshot, channels []int, requestPath string) []int {
 	if requestPath == "" || len(channels) == 0 {
 		return channels
 	}
 	filtered := make([]int, 0, len(channels))
 	for _, channelId := range channels {
-		channel, ok := channelsIDM[channelId]
+		channel, ok := snap.channelsIDM[channelId]
 		if !ok {
 			// keep it so the downstream consistency error is raised as before
 			filtered = append(filtered, channelId)
@@ -223,7 +386,7 @@ func filterChannelsByRequestPath(channels []int, requestPath string) []int {
 			filtered = append(filtered, channelId)
 			continue
 		}
-		if config := channel2advancedCustomConfig[channelId]; config != nil && config.SupportsPath(requestPath) {
+		if config := snap.advancedCustomConfig[channelId]; config != nil && config.SupportsPath(requestPath) {
 			filtered = append(filtered, channelId)
 		}
 	}
@@ -234,10 +397,11 @@ func CacheGetChannel(id int) (*Channel, error) {
 	if !common.MemoryCacheEnabled {
 		return GetChannelById(id, true)
 	}
-	channelSyncLock.RLock()
-	defer channelSyncLock.RUnlock()
-
-	c, ok := channelsIDM[id]
+	snap := loadSnapshot()
+	if snap == nil {
+		return nil, fmt.Errorf("渠道# %d，已不存在", id)
+	}
+	c, ok := snap.channelsIDM[id]
 	if !ok {
 		return nil, fmt.Errorf("渠道# %d，已不存在", id)
 	}
@@ -252,10 +416,11 @@ func CacheGetChannelInfo(id int) (*ChannelInfo, error) {
 		}
 		return &channel.ChannelInfo, nil
 	}
-	channelSyncLock.RLock()
-	defer channelSyncLock.RUnlock()
-
-	c, ok := channelsIDM[id]
+	snap := loadSnapshot()
+	if snap == nil {
+		return nil, fmt.Errorf("渠道# %d，已不存在", id)
+	}
+	c, ok := snap.channelsIDM[id]
 	if !ok {
 		return nil, fmt.Errorf("渠道# %d，已不存在", id)
 	}
@@ -266,43 +431,76 @@ func CacheUpdateChannelStatus(id int, status int) {
 	if !common.MemoryCacheEnabled {
 		return
 	}
-	channelSyncLock.Lock()
-	defer channelSyncLock.Unlock()
-	if channel, ok := channelsIDM[id]; ok {
-		channel.Status = status
+	channelCacheMu.Lock()
+	defer channelCacheMu.Unlock()
+
+	snap := channelCachePtr.Load()
+	if snap == nil {
+		return
 	}
+	ch, ok := snap.channelsIDM[id]
+	if !ok {
+		return
+	}
+	ch.Status = status
+
 	if status != common.ChannelStatusEnabled {
-		// delete the channel from group2model2channels
-		for group, model2channels := range group2model2channels {
-			for model, channels := range model2channels {
-				for i, channelId := range channels {
-					if channelId == id {
-						// remove the channel from the slice
-						group2model2channels[group][model] = append(channels[:i], channels[i+1:]...)
-						break
+		// Clone group2model2channels and remove the channel
+		newG2M2C := make(map[string]map[string][]int, len(snap.group2model2channels))
+		for group, m2c := range snap.group2model2channels {
+			newM2C := make(map[string][]int, len(m2c))
+			for model, channels := range m2c {
+				newSlice := make([]int, 0, len(channels))
+				for _, cid := range channels {
+					if cid != id {
+						newSlice = append(newSlice, cid)
 					}
 				}
+				newM2C[model] = newSlice
 			}
+			newG2M2C[group] = newM2C
 		}
+
+		// Clone channelsIDM with updated status
+		newIDM := maps.Clone(snap.channelsIDM)
+		newIDM[id] = ch
+
+		newSnap := &channelCacheSnapshot{
+			group2model2channels: newG2M2C,
+			channelsIDM:          newIDM,
+			advancedCustomConfig: snap.advancedCustomConfig,
+			priorityGroups:       buildPriorityGroups(newG2M2C, newIDM),
+		}
+		channelCachePtr.Store(newSnap)
 	}
 }
 
 func CacheUpdateChannel(channel *Channel) {
-	if !common.MemoryCacheEnabled {
+	if !common.MemoryCacheEnabled || channel == nil {
 		return
 	}
-	channelSyncLock.Lock()
-	defer channelSyncLock.Unlock()
-	if channel == nil {
-		return
-	}
+	channelCacheMu.Lock()
+	defer channelCacheMu.Unlock()
 
-	if channelsIDM == nil {
-		channelsIDM = make(map[int]*Channel)
+	snap := channelCachePtr.Load()
+	if snap == nil {
+		return
 	}
-	if oldChannel, ok := channelsIDM[channel.Id]; ok {
+	if oldChannel, ok := snap.channelsIDM[channel.Id]; ok {
 		logger.LogDebug(nil, "CacheUpdateChannel before: id=%d, name=%s, status=%d, polling_index=%d", channel.Id, channel.Name, channel.Status, oldChannel.ChannelInfo.MultiKeyPollingIndex)
 	}
-	channelsIDM[channel.Id] = channel
+
+	// Clone channelsIDM and replace the channel
+	newIDM := maps.Clone(snap.channelsIDM)
+	newIDM[channel.Id] = channel
+
+	newSnap := &channelCacheSnapshot{
+		group2model2channels: snap.group2model2channels,
+		channelsIDM:          newIDM,
+		advancedCustomConfig: snap.advancedCustomConfig,
+		priorityGroups:       snap.priorityGroups,
+	}
+	channelCachePtr.Store(newSnap)
+
 	logger.LogDebug(nil, "CacheUpdateChannel after: id=%d, name=%s, status=%d, polling_index=%d", channel.Id, channel.Name, channel.Status, channel.ChannelInfo.MultiKeyPollingIndex)
 }

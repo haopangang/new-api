@@ -13,19 +13,17 @@ func IsChannelEnabledForGroupModel(group string, modelName string, channelID int
 		return isChannelEnabledForGroupModelDB(group, modelName, channelID)
 	}
 
-	channelSyncLock.RLock()
-	defer channelSyncLock.RUnlock()
-
-	if group2model2channels == nil {
+	snap := loadSnapshot()
+	if snap == nil || snap.group2model2channels == nil {
 		return false
 	}
 
-	if isChannelIDInList(group2model2channels[group][modelName], channelID) {
+	if isChannelIDInList(snap.group2model2channels[group][modelName], channelID) {
 		return true
 	}
 	normalized := ratio_setting.FormatMatchingModelName(modelName)
 	if normalized != "" && normalized != modelName {
-		return isChannelIDInList(group2model2channels[group][normalized], channelID)
+		return isChannelIDInList(snap.group2model2channels[group][normalized], channelID)
 	}
 	return false
 }
