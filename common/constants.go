@@ -152,10 +152,16 @@ var PreConsumedQuota = 500
 
 var RetryTimes = 0
 
-// MultiKeyCooldown 429 冷却机制配置
-var MultiKeyCooldownEnabled = true  // 是否启用 429 冷却
-var MultiKeyCooldownBaseSec = 5     // 基础冷却秒数
-var MultiKeyCooldownMaxSec = 120    // 最大冷却秒数
+// KeyScore 多Key评分机制配置
+// 每个 key 维护一个 0-100 的评分，用于智能选择优秀 key
+var KeyScoreDefault int64 = 50            // 新 key 初始评分
+var KeyScoreMax int64 = 100               // 评分上限
+var KeyScoreMin int64 = 0                 // 评分下限
+var KeyScoreSuccessBoost int64 = 2        // 成功请求加分
+var KeyScore429Penalty int64 = 20         // 429 错误扣分
+var KeyScoreSlowPenalty int64 = 15        // 慢响应扣分
+var KeyScoreDisableThreshold int64 = 10   // 低于此分数自动降权（不完全禁用，但极低优先级）
+var SlowResponseThresholdMs int64 = 10000 // 慢响应基础阈值（10 秒），会根据 token 数动态调整
 
 //var RootUserEmail = ""
 

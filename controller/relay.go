@@ -223,11 +223,16 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		if newAPIError == nil {
 			relayInfo.LastError = nil
-			// 成功时重置 429 计数
+			// 成功时更新评分
 			if channel.ChannelInfo.IsMultiKey {
 				keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
 				if keyIndex >= 0 {
-					channel.ResetKey429Count(keyIndex)
+					startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
+					if !startTime.IsZero() {
+						responseTimeMs := time.Since(startTime).Milliseconds()
+						estimatedTokens := relayInfo.GetEstimatePromptTokens()
+						channel.UpdateKeyScoreSuccess(keyIndex, responseTimeMs, estimatedTokens)
+					}
 				}
 			}
 			return
@@ -236,11 +241,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		newAPIError = service.NormalizeViolationFeeError(newAPIError)
 		relayInfo.LastError = newAPIError
 
-		// 429 冷却记录
+		// 429 错误：评分扣分
 		if newAPIError.StatusCode == http.StatusTooManyRequests && channel.ChannelInfo.IsMultiKey {
 			keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
 			if keyIndex >= 0 {
-				channel.RecordKeyCooldown(keyIndex, newAPIError.RetryAfter)
+				channel.UpdateKeyScoreOn429(keyIndex)
 			}
 		}
 
@@ -565,11 +570,15 @@ func RelayTask(c *gin.Context) {
 
 		result, taskErr = relay.RelayTaskSubmit(c, relayInfo)
 		if taskErr == nil {
-			// 成功时重置 429 计数
+			// 成功时更新评分
 			if channel.ChannelInfo.IsMultiKey {
 				keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
 				if keyIndex >= 0 {
-					channel.ResetKey429Count(keyIndex)
+					startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
+					if !startTime.IsZero() {
+						responseTimeMs := time.Since(startTime).Milliseconds()
+						channel.UpdateKeyScoreSuccess(keyIndex, responseTimeMs, 0)
+					}
 				}
 			}
 			break
@@ -582,11 +591,11 @@ func RelayTask(c *gin.Context) {
 				types.NewOpenAIError(taskErr.Error, types.ErrorCodeBadResponseStatusCode, taskErr.StatusCode))
 		}
 
-		// 429 冷却记录
+		// 429 错误：评分扣分
 		if taskErr.StatusCode == http.StatusTooManyRequests && channel.ChannelInfo.IsMultiKey {
 			keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
 			if keyIndex >= 0 {
-				channel.RecordKeyCooldown(keyIndex, 0) // Task relay 无 RetryAfter，使用默认退避
+				channel.UpdateKeyScoreOn429(keyIndex)
 			}
 		}
 

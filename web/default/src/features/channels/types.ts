@@ -217,6 +217,10 @@ export interface KeyStatus {
   disabled_time?: number
   reason?: string
   key_preview?: string
+  score?: number
+  avg_response_time?: number
+  total_requests?: number
+  success_count?: number
 }
 
 export type MultiKeyConfirmAction = {
@@ -242,7 +246,6 @@ export interface MultiKeyStatusResponse {
     enabled_count: number
     manual_disabled_count: number
     auto_disabled_count: number
-    cooling_down_count: number
   }
 }
 

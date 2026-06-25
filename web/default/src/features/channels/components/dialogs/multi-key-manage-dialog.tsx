@@ -81,7 +81,6 @@ export function MultiKeyManageDialog({
   const [enabledCount, setEnabledCount] = useState(0)
   const [manualDisabledCount, setManualDisabledCount] = useState(0)
   const [autoDisabledCount, setAutoDisabledCount] = useState(0)
-  const [coolingDownCount, setCoolingDownCount] = useState(0)
 
   // UI state
   const [statusFilter, setStatusFilter] = useState<number | null>(null)
@@ -125,7 +124,6 @@ export function MultiKeyManageDialog({
         setEnabledCount(response.data.enabled_count || 0)
         setManualDisabledCount(response.data.manual_disabled_count || 0)
         setAutoDisabledCount(response.data.auto_disabled_count || 0)
-        setCoolingDownCount(response.data.cooling_down_count || 0)
       } else {
         toast.error(response.message || t('Failed to load key status'))
       }
@@ -253,7 +251,7 @@ export function MultiKeyManageDialog({
       >
         <div className='flex min-h-0 flex-1 flex-col space-y-4 overflow-hidden'>
           {/* Statistics */}
-          <div className='grid shrink-0 grid-cols-4 gap-3'>
+          <div className='grid shrink-0 grid-cols-3 gap-3'>
             <StatisticsCard
               label={t('Enabled')}
               count={enabledCount}
@@ -267,11 +265,6 @@ export function MultiKeyManageDialog({
             <StatisticsCard
               label={t('Auto Disabled')}
               count={autoDisabledCount}
-              total={total}
-            />
-            <StatisticsCard
-              label={t('Cooling Down')}
-              count={coolingDownCount}
               total={total}
             />
           </div>
@@ -388,6 +381,55 @@ export function MultiKeyManageDialog({
                     className: 'min-w-[200px]',
                     cellClassName: 'font-mono text-sm',
                     cell: (key) => key.key_preview || '-',
+                  },
+                  {
+                    id: 'score',
+                    header: t('Score'),
+                    className: 'w-20',
+                    cellClassName: 'font-mono text-sm text-center',
+                    cell: (key) => {
+                      const score = key.score ?? 50
+                      const color =
+                        score >= 70
+                          ? 'text-green-600'
+                          : score >= 40
+                            ? 'text-yellow-600'
+                            : 'text-red-600'
+                      return <span className={color}>{score}</span>
+                    },
+                  },
+                  {
+                    id: 'avg-resp-time',
+                    header: t('Avg Resp'),
+                    className: 'w-24',
+                    cellClassName: 'font-mono text-sm text-center',
+                    cell: (key) => {
+                      const ms = key.avg_response_time
+                      if (!ms || ms === 0) return '-'
+                      return ms >= 1000
+                        ? `${(ms / 1000).toFixed(1)}s`
+                        : `${ms}ms`
+                    },
+                  },
+                  {
+                    id: 'requests',
+                    header: t('Requests'),
+                    className: 'w-24',
+                    cellClassName: 'font-mono text-sm text-center',
+                    cell: (key) => {
+                      const total = key.total_requests ?? 0
+                      const success = key.success_count ?? 0
+                      if (total === 0) return '-'
+                      const rate = ((success / total) * 100).toFixed(0)
+                      return (
+                        <span title={`${success}/${total}`}>
+                          {total}{' '}
+                          <span className='text-muted-foreground'>
+                            ({rate}%)
+                          </span>
+                        </span>
+                      )
+                    },
                   },
                   {
                     id: 'status',

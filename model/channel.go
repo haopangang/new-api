@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -68,9 +66,8 @@ type ChannelInfo struct {
 	MultiKeyDisabledTime   map[int]int64         `json:"multi_key_disabled_time,omitempty"`   // key禁用时间列表，key index -> time
 	MultiKeyPollingIndex   int                   `json:"multi_key_polling_index"`             // 多Key模式下轮询的key索引
 	MultiKeyMode           constant.MultiKeyMode `json:"multi_key_mode"`
-	// 429 冷却机制
-	MultiKeyCooldownUntil map[int]int64 `json:"multi_key_cooldown_until,omitempty"` // key index -> 冷却过期时间(Unix秒)
-	MultiKey429Count      map[int]int   `json:"multi_key_429_count,omitempty"`       // key index -> 连续429次数
+	// Key 评分机制（纯内存，不持久化到数据库，服务重启后重新评分）
+	// 评分状态存储在全局 keyScoreStore 中
 }
 
 type ChannelSortOptions struct {
@@ -229,31 +226,14 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 		return common.ChannelStatusEnabled
 	}
 
-	// Collect indexes of enabled keys, filtering out cooldown keys
+	// Collect indexes of enabled keys, initialize scores for new keys
 	enabledIdx := make([]int, 0, len(keys))
-	cooldownIdx := make([]int, 0)
 	for i := range keys {
-		if getStatus(i) != common.ChannelStatusEnabled {
-			continue
+		// 初始化新 key 的评分
+		channel.InitKeyScore(i)
+		if getStatus(i) == common.ChannelStatusEnabled {
+			enabledIdx = append(enabledIdx, i)
 		}
-		if channel.IsKeyInCooldown(i) {
-			cooldownIdx = append(cooldownIdx, i)
-			continue
-		}
-		enabledIdx = append(enabledIdx, i)
-	}
-
-	// 兜底：所有 enabled key 都在冷却期，选冷却最早过期的
-	if len(enabledIdx) == 0 && len(cooldownIdx) > 0 {
-		earliestIdx := cooldownIdx[0]
-		earliestUntil := channel.ChannelInfo.MultiKeyCooldownUntil[earliestIdx]
-		for _, idx := range cooldownIdx[1:] {
-			if channel.ChannelInfo.MultiKeyCooldownUntil[idx] < earliestUntil {
-				earliestIdx = idx
-				earliestUntil = channel.ChannelInfo.MultiKeyCooldownUntil[idx]
-			}
-		}
-		enabledIdx = []int{earliestIdx}
 	}
 
 	if len(enabledIdx) == 0 {
@@ -262,12 +242,11 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 
 	switch channel.ChannelInfo.MultiKeyMode {
 	case constant.MultiKeyModeRandom:
-		// Randomly pick one enabled key
-		selectedIdx := enabledIdx[rand.Intn(len(enabledIdx))]
+		// 基于评分的加权随机选择，评分高的 key 被选中概率更大
+		selectedIdx := channel.SelectKeyByScore(enabledIdx)
 		return keys[selectedIdx], selectedIdx, nil
 	case constant.MultiKeyModePolling:
-		// Use channel-specific lock to ensure thread-safe polling
-
+		// 轮询模式也使用评分加权选择，优先选择高质量 key
 		channelInfo, err := CacheGetChannelInfo(channel.Id)
 		if err != nil {
 			return "", 0, types.NewError(err, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
@@ -278,11 +257,9 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 			}
 			if !common.MemoryCacheEnabled {
 				_ = channel.SaveChannelInfo()
-			} else {
-				// CacheUpdateChannel(channel)
 			}
 		}()
-		// Start from the saved polling index and look for the next enabled key
+		// 更新轮询索引（保持轮询进度，但选择由评分决定）
 		start := channelInfo.MultiKeyPollingIndex
 		if start < 0 || start >= len(keys) {
 			start = 0
@@ -290,97 +267,21 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 		for i := 0; i < len(keys); i++ {
 			idx := (start + i) % len(keys)
 			if getStatus(idx) == common.ChannelStatusEnabled {
-				// update polling index for next call (point to the next position)
 				channel.ChannelInfo.MultiKeyPollingIndex = (idx + 1) % len(keys)
-				return keys[idx], idx, nil
+				break
 			}
 		}
-		// Fallback – should not happen, but return first enabled key
-		return keys[enabledIdx[0]], enabledIdx[0], nil
+		// 使用评分加权选择
+		selectedIdx := channel.SelectKeyByScore(enabledIdx)
+		return keys[selectedIdx], selectedIdx, nil
 	default:
-		// Unknown mode, default to first enabled key (or original key string)
-		return keys[enabledIdx[0]], enabledIdx[0], nil
+		selectedIdx := channel.SelectKeyByScore(enabledIdx)
+		return keys[selectedIdx], selectedIdx, nil
 	}
 }
 
 func (channel *Channel) SaveChannelInfo() error {
 	return DB.Model(channel).Update("channel_info", channel.ChannelInfo).Error
-}
-
-// RecordKeyCooldown 记录 key 的 429 冷却
-func (channel *Channel) RecordKeyCooldown(keyIndex int, retryAfter int) {
-	if !common.MultiKeyCooldownEnabled || !channel.ChannelInfo.IsMultiKey {
-		return
-	}
-
-	if channel.ChannelInfo.MultiKeyCooldownUntil == nil {
-		channel.ChannelInfo.MultiKeyCooldownUntil = make(map[int]int64)
-	}
-	if channel.ChannelInfo.MultiKey429Count == nil {
-		channel.ChannelInfo.MultiKey429Count = make(map[int]int)
-	}
-
-	var cooldown int64
-	if retryAfter > 0 {
-		// 优先使用 Retry-After header，但不超过最大冷却
-		cooldown = int64(retryAfter)
-		if cooldown > int64(common.MultiKeyCooldownMaxSec) {
-			cooldown = int64(common.MultiKeyCooldownMaxSec)
-		}
-	} else {
-		// 指数退避：base * 2^(count-1)
-		count := channel.ChannelInfo.MultiKey429Count[keyIndex]
-		cooldown = int64(common.MultiKeyCooldownBaseSec) << count
-		if cooldown > int64(common.MultiKeyCooldownMaxSec) {
-			cooldown = int64(common.MultiKeyCooldownMaxSec)
-		}
-	}
-	if cooldown < 1 {
-		cooldown = 1
-	}
-
-	channel.ChannelInfo.MultiKeyCooldownUntil[keyIndex] = time.Now().Unix() + cooldown
-	channel.ChannelInfo.MultiKey429Count[keyIndex]++
-
-	_ = channel.SaveChannelInfo()
-}
-
-// ResetKey429Count 成功响应时重置 429 计数
-func (channel *Channel) ResetKey429Count(keyIndex int) {
-	if channel.ChannelInfo.MultiKey429Count != nil {
-		if _, exists := channel.ChannelInfo.MultiKey429Count[keyIndex]; exists {
-			delete(channel.ChannelInfo.MultiKey429Count, keyIndex)
-			_ = channel.SaveChannelInfo()
-		}
-	}
-}
-
-// IsKeyInCooldown 检查 key 是否在冷却期
-func (channel *Channel) IsKeyInCooldown(keyIndex int) bool {
-	if channel.ChannelInfo.MultiKeyCooldownUntil == nil {
-		return false
-	}
-	until, exists := channel.ChannelInfo.MultiKeyCooldownUntil[keyIndex]
-	if !exists {
-		return false
-	}
-	return time.Now().Unix() < until
-}
-
-// GetKeyCooldownRemaining 获取 key 剩余冷却秒数，0 表示未在冷却
-func (channel *Channel) GetKeyCooldownRemaining(keyIndex int) int64 {
-	if channel.ChannelInfo.MultiKeyCooldownUntil == nil {
-		return 0
-	}
-	until, exists := channel.ChannelInfo.MultiKeyCooldownUntil[keyIndex]
-	if !exists {
-		return 0
-	}
-	remaining := until - time.Now().Unix()
-	if remaining < 0 {
-		return 0
-	}
-	return remaining
 }
 
 func (channel *Channel) GetModels() []string {
