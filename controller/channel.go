@@ -1331,6 +1331,7 @@ type MultiKeyStatusResponse struct {
 	EnabledCount        int `json:"enabled_count"`
 	ManualDisabledCount int `json:"manual_disabled_count"`
 	AutoDisabledCount   int `json:"auto_disabled_count"`
+	GoodKeyCount        int `json:"good_key_count"` // keys with score >= 50
 }
 
 type KeyStatus struct {
@@ -1494,7 +1495,7 @@ func ManageMultiKeys(c *gin.Context) {
 		}
 
 		// Statistics for all keys (unchanged by filtering)
-		var enabledCount, manualDisabledCount, autoDisabledCount int
+		var enabledCount, manualDisabledCount, autoDisabledCount, goodKeyCount int
 
 		// Build all key status data first
 		var allKeyStatusList []KeyStatus
@@ -1517,6 +1518,10 @@ func ManageMultiKeys(c *gin.Context) {
 				manualDisabledCount++
 			case 3:
 				autoDisabledCount++
+			}
+			// Count good keys (score >= threshold)
+			if channel.GetKeyScore(i) >= model.GoodKeyScoreThreshold {
+				goodKeyCount++
 			}
 
 			if status != 1 {
@@ -1599,6 +1604,7 @@ func ManageMultiKeys(c *gin.Context) {
 				EnabledCount:        enabledCount,        // Overall statistics
 				ManualDisabledCount: manualDisabledCount, // Overall statistics
 				AutoDisabledCount:   autoDisabledCount,   // Overall statistics
+				GoodKeyCount:        goodKeyCount,        // Keys with score >= threshold
 			},
 		})
 		return

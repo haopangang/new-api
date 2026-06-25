@@ -246,6 +246,7 @@ export interface MultiKeyStatusResponse {
     enabled_count: number
     manual_disabled_count: number
     auto_disabled_count: number
+    good_key_count: number
   }
 }
 
