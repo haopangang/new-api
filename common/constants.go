@@ -156,8 +156,8 @@ var RetryTimes = 0
 // 每个 key 维护一个 0-100 的评分，用于智能选择优秀 key
 var KeyScoreDefault int64 = 50            // 新 key 初始评分
 var KeyScoreMax int64 = 100               // 评分上限
-var KeyScoreMin int64 = 0                 // 评分下限
-var KeyScoreSuccessBoost int64 = 2        // 成功请求加分
+var KeyScoreMin int64 = 10                // 评分下限（保底，不会完全禁用）
+var KeyScoreSuccessBoost int64 = 5        // 成功请求加分（加快恢复）
 var KeyScore429Penalty int64 = 20         // 429 错误扣分
 var KeyScoreErrorPenalty int64 = 8       // 服务端错误扣分（500/502/503/504）
 var KeyScoreSlowPenalty int64 = 15        // 慢响应扣分
