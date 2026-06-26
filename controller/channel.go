@@ -2049,6 +2049,254 @@ func ManageMultiKeys(c *gin.Context) {
 	}
 }
 
+// AddMultiKeysPublicRequest is the request for the public add-keys endpoint.
+type AddMultiKeysPublicRequest struct {
+	ChannelId int    `json:"channel_id"`
+	Keys      string `json:"keys"`
+}
+
+// AddMultiKeysPublic adds keys to a multi-key channel without requiring admin auth.
+// Only supports adding keys — no disable/enable/delete operations.
+func AddMultiKeysPublic(c *gin.Context) {
+	var request AddMultiKeysPublicRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "invalid request: " + err.Error(),
+		})
+		return
+	}
+
+	if request.Keys == "" {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "未提供要添加的密钥",
+		})
+		return
+	}
+
+	channel, err := model.GetChannelById(request.ChannelId, true)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "渠道不存在",
+		})
+		return
+	}
+
+	if !channel.ChannelInfo.IsMultiKey {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "该渠道不是多密钥模式",
+		})
+		return
+	}
+
+	lock := model.GetChannelPollingLock(channel.Id)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// Parse keys
+	var newKeys []string
+	trimmedInput := strings.TrimSpace(request.Keys)
+	if strings.HasPrefix(trimmedInput, "[") {
+		var arr []string
+		if err := json.Unmarshal([]byte(trimmedInput), &arr); err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "JSON数组格式解析失败: " + err.Error(),
+			})
+			return
+		}
+		newKeys = arr
+	} else {
+		for _, line := range strings.Split(trimmedInput, "\n") {
+			key := strings.TrimSpace(line)
+			if key != "" {
+				newKeys = append(newKeys, key)
+			}
+		}
+	}
+
+	if len(newKeys) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "未找到有效的密钥",
+		})
+		return
+	}
+
+	// Clean keys
+	var cleanedKeys []string
+	for _, key := range newKeys {
+		cleaned := cleanKey(key)
+		if cleaned != "" {
+			cleanedKeys = append(cleanedKeys, cleaned)
+		}
+	}
+
+	if len(cleanedKeys) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "清理后未找到有效的密钥",
+		})
+		return
+	}
+
+	// Deduplicate against existing keys
+	existingKeys := channel.GetKeys()
+	existingSet := make(map[string]struct{}, len(existingKeys))
+	for _, key := range existingKeys {
+		normalized := strings.TrimSpace(key)
+		if normalized != "" {
+			existingSet[normalized] = struct{}{}
+		}
+	}
+
+	var addedCount int
+	var dedupedNewKeys []string
+	for _, key := range cleanedKeys {
+		normalized := strings.TrimSpace(key)
+		if normalized == "" {
+			continue
+		}
+		if _, exists := existingSet[normalized]; exists {
+			continue
+		}
+		existingSet[normalized] = struct{}{}
+		dedupedNewKeys = append(dedupedNewKeys, normalized)
+		addedCount++
+	}
+
+	if addedCount == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "所有密钥都已存在，没有新密钥可添加",
+		})
+		return
+	}
+
+	allKeys := append(existingKeys, dedupedNewKeys...)
+	channel.Key = strings.Join(allKeys, "\n")
+	channel.ChannelInfo.MultiKeySize = len(allKeys)
+
+	if err := channel.Update(); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	model.InitChannelCache()
+	service.ResetProxyClientCache()
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": fmt.Sprintf("成功添加 %d 个密钥", addedCount),
+		"data":    addedCount,
+	})
+}
+
+// DeleteDisabledKeysPublicRequest is the request for the public delete-disabled-keys endpoint.
+type DeleteDisabledKeysPublicRequest struct {
+	ChannelId int `json:"channel_id"`
+}
+
+// DeleteDisabledKeysPublic deletes auto-disabled keys from a multi-key channel without requiring admin auth.
+// Only deletes auto-disabled keys (status==3), preserves enabled and manually-disabled keys.
+func DeleteDisabledKeysPublic(c *gin.Context) {
+	var request DeleteDisabledKeysPublicRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "invalid request: " + err.Error(),
+		})
+		return
+	}
+
+	channel, err := model.GetChannelById(request.ChannelId, true)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "渠道不存在",
+		})
+		return
+	}
+
+	if !channel.ChannelInfo.IsMultiKey {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "该渠道不是多密钥模式",
+		})
+		return
+	}
+
+	lock := model.GetChannelPollingLock(channel.Id)
+	lock.Lock()
+	defer lock.Unlock()
+
+	keys := channel.GetKeys()
+	var remainingKeys []string
+	var deletedCount int
+	var newStatusList = make(map[int]int)
+	var newDisabledTime = make(map[int]int64)
+	var newDisabledReason = make(map[int]string)
+
+	newIndex := 0
+	for i, key := range keys {
+		status := 1
+		if channel.ChannelInfo.MultiKeyStatusList != nil {
+			if s, exists := channel.ChannelInfo.MultiKeyStatusList[i]; exists {
+				status = s
+			}
+		}
+
+		if status == 3 {
+			deletedCount++
+			channel.PurgeKeyScore(key)
+		} else {
+			remainingKeys = append(remainingKeys, key)
+			if status != 1 {
+				newStatusList[newIndex] = status
+				if channel.ChannelInfo.MultiKeyDisabledTime != nil {
+					if t, exists := channel.ChannelInfo.MultiKeyDisabledTime[i]; exists {
+						newDisabledTime[newIndex] = t
+					}
+				}
+				if channel.ChannelInfo.MultiKeyDisabledReason != nil {
+					if r, exists := channel.ChannelInfo.MultiKeyDisabledReason[i]; exists {
+						newDisabledReason[newIndex] = r
+					}
+				}
+			}
+			newIndex++
+		}
+	}
+
+	if deletedCount == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "没有需要删除的自动禁用密钥",
+		})
+		return
+	}
+
+	channel.Key = strings.Join(remainingKeys, "\n")
+	channel.ChannelInfo.MultiKeySize = len(remainingKeys)
+	channel.ChannelInfo.MultiKeyStatusList = newStatusList
+	channel.ChannelInfo.MultiKeyDisabledTime = newDisabledTime
+	channel.ChannelInfo.MultiKeyDisabledReason = newDisabledReason
+
+	if err := channel.Update(); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	model.InitChannelCache()
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": fmt.Sprintf("已删除 %d 个自动禁用的密钥", deletedCount),
+		"data":    deletedCount,
+	})
+}
+
 // OllamaPullModel 拉取 Ollama 模型
 func OllamaPullModel(c *gin.Context) {
 	var req struct {
