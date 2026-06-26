@@ -1441,6 +1441,84 @@ func isValidKeyFormat(s string) bool {
 	return true
 }
 
+// parseKeyInput 解析密钥输入（支持 JSON 数组和换行分隔格式）
+func parseKeyInput(input string) ([]string, error) {
+	trimmedInput := strings.TrimSpace(input)
+	if trimmedInput == "" {
+		return nil, nil
+	}
+
+	var keys []string
+	if strings.HasPrefix(trimmedInput, "[") {
+		var arr []string
+		if err := common.Unmarshal([]byte(trimmedInput), &arr); err != nil {
+			return nil, fmt.Errorf("JSON数组格式解析失败: %w", err)
+		}
+		keys = arr
+	} else {
+		for _, line := range strings.Split(trimmedInput, "\n") {
+			key := strings.TrimSpace(line)
+			if key != "" {
+				keys = append(keys, key)
+			}
+		}
+	}
+	return keys, nil
+}
+
+// cleanAndDeduplicateKeys 清理并去重新密钥
+// 返回去重后的新密钥列表和添加数量
+func cleanAndDeduplicateKeys(existingKeys []string, newKeys []string) ([]string, int) {
+	// 清理新密钥
+	var cleanedKeys []string
+	for _, key := range newKeys {
+		cleaned := cleanKey(key)
+		if cleaned != "" {
+			cleanedKeys = append(cleanedKeys, cleaned)
+		}
+	}
+
+	// 构建已有密钥集合
+	existingSet := make(map[string]struct{}, len(existingKeys))
+	for _, key := range existingKeys {
+		normalized := strings.TrimSpace(key)
+		if normalized != "" {
+			existingSet[normalized] = struct{}{}
+		}
+	}
+
+	// 去重
+	var deduped []string
+	for _, key := range cleanedKeys {
+		normalized := strings.TrimSpace(key)
+		if normalized == "" {
+			continue
+		}
+		if _, exists := existingSet[normalized]; exists {
+			continue
+		}
+		existingSet[normalized] = struct{}{}
+		deduped = append(deduped, normalized)
+	}
+	return deduped, len(deduped)
+}
+
+// commitNewKeysToChannel 将新密钥提交到渠道并刷新缓存
+func commitNewKeysToChannel(channel *model.Channel, existingKeys []string, dedupedNewKeys []string) error {
+	allKeys := make([]string, len(existingKeys), len(existingKeys)+len(dedupedNewKeys))
+	copy(allKeys, existingKeys)
+	allKeys = append(allKeys, dedupedNewKeys...)
+	channel.Key = strings.Join(allKeys, "\n")
+	channel.ChannelInfo.MultiKeySize = len(allKeys)
+
+	if err := channel.Update(); err != nil {
+		return err
+	}
+	model.InitChannelCache()
+	service.ResetProxyClientCache()
+	return nil
+}
+
 // ManageMultiKeys handles multi-key management operations
 func ManageMultiKeys(c *gin.Context) {
 	request := MultiKeyManageRequest{}
@@ -1484,7 +1562,9 @@ func ManageMultiKeys(c *gin.Context) {
 	switch request.Action {
 	case "get_key_status":
 		keys := channel.GetKeys()
-		model.DebugKeyScoreStore(channel.Id)
+		if common.DebugEnabled {
+			model.DebugKeyScoreStore(channel.Id)
+		}
 
 		// Default pagination parameters
 		page := request.Page
@@ -1933,32 +2013,14 @@ func ManageMultiKeys(c *gin.Context) {
 			return
 		}
 
-		// Parse new keys from input
-		var newKeys []string
-		trimmedInput := strings.TrimSpace(request.Keys)
-
-		if strings.HasPrefix(trimmedInput, "[") {
-			// JSON array format
-			var arr []string
-			if err := json.Unmarshal([]byte(trimmedInput), &arr); err != nil {
-				c.JSON(http.StatusOK, gin.H{
-					"success": false,
-					"message": "JSON数组格式解析失败: " + err.Error(),
-				})
-				return
-			}
-			newKeys = arr
-		} else {
-			// Newline-separated format
-			lines := strings.Split(trimmedInput, "\n")
-			for _, line := range lines {
-				key := strings.TrimSpace(line)
-				if key != "" {
-					newKeys = append(newKeys, key)
-				}
-			}
+		newKeys, parseErr := parseKeyInput(request.Keys)
+		if parseErr != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": parseErr.Error(),
+			})
+			return
 		}
-
 		if len(newKeys) == 0 {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
@@ -1967,72 +2029,22 @@ func ManageMultiKeys(c *gin.Context) {
 			return
 		}
 
-		// Clean keys: remove special characters and handle base64
-		var cleanedKeys []string
-		for _, key := range newKeys {
-			cleaned := cleanKey(key)
-			if cleaned != "" {
-				cleanedKeys = append(cleanedKeys, cleaned)
-			}
-		}
-
-		if len(cleanedKeys) == 0 {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "清理后未找到有效的密钥",
-			})
-			return
-		}
-
-		// Get existing keys
 		existingKeys := channel.GetKeys()
-
-		// Deduplicate: build set of existing keys
-		existingSet := make(map[string]struct{}, len(existingKeys))
-		for _, key := range existingKeys {
-			normalized := strings.TrimSpace(key)
-			if normalized != "" {
-				existingSet[normalized] = struct{}{}
-			}
-		}
-
-		// Filter out duplicates from new keys
-		var addedCount int
-		var dedupedNewKeys []string
-		for _, key := range cleanedKeys {
-			normalized := strings.TrimSpace(key)
-			if normalized == "" {
-				continue
-			}
-			if _, exists := existingSet[normalized]; exists {
-				continue
-			}
-			existingSet[normalized] = struct{}{}
-			dedupedNewKeys = append(dedupedNewKeys, normalized)
-			addedCount++
-		}
+		dedupedNewKeys, addedCount := cleanAndDeduplicateKeys(existingKeys, newKeys)
 
 		if addedCount == 0 {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
-				"message": "所有密钥都已存在，没有新密钥可添加",
+				"message": "清理后未找到有效的密钥或所有密钥都已存在",
 			})
 			return
 		}
 
-		// Append new keys to existing keys
-		allKeys := append(existingKeys, dedupedNewKeys...)
-		channel.Key = strings.Join(allKeys, "\n")
-		channel.ChannelInfo.MultiKeySize = len(allKeys)
-
-		err = channel.Update()
-		if err != nil {
+		if err := commitNewKeysToChannel(channel, existingKeys, dedupedNewKeys); err != nil {
 			common.ApiError(c, err)
 			return
 		}
 
-		model.InitChannelCache()
-		service.ResetProxyClientCache()
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,
 			"message": fmt.Sprintf("成功添加 %d 个密钥", addedCount),
@@ -2096,28 +2108,14 @@ func AddMultiKeysPublic(c *gin.Context) {
 	lock.Lock()
 	defer lock.Unlock()
 
-	// Parse keys
-	var newKeys []string
-	trimmedInput := strings.TrimSpace(request.Keys)
-	if strings.HasPrefix(trimmedInput, "[") {
-		var arr []string
-		if err := json.Unmarshal([]byte(trimmedInput), &arr); err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "JSON数组格式解析失败: " + err.Error(),
-			})
-			return
-		}
-		newKeys = arr
-	} else {
-		for _, line := range strings.Split(trimmedInput, "\n") {
-			key := strings.TrimSpace(line)
-			if key != "" {
-				newKeys = append(newKeys, key)
-			}
-		}
+	newKeys, parseErr := parseKeyInput(request.Keys)
+	if parseErr != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": parseErr.Error(),
+		})
+		return
 	}
-
 	if len(newKeys) == 0 {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
@@ -2126,67 +2124,22 @@ func AddMultiKeysPublic(c *gin.Context) {
 		return
 	}
 
-	// Clean keys
-	var cleanedKeys []string
-	for _, key := range newKeys {
-		cleaned := cleanKey(key)
-		if cleaned != "" {
-			cleanedKeys = append(cleanedKeys, cleaned)
-		}
-	}
-
-	if len(cleanedKeys) == 0 {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": "清理后未找到有效的密钥",
-		})
-		return
-	}
-
-	// Deduplicate against existing keys
 	existingKeys := channel.GetKeys()
-	existingSet := make(map[string]struct{}, len(existingKeys))
-	for _, key := range existingKeys {
-		normalized := strings.TrimSpace(key)
-		if normalized != "" {
-			existingSet[normalized] = struct{}{}
-		}
-	}
-
-	var addedCount int
-	var dedupedNewKeys []string
-	for _, key := range cleanedKeys {
-		normalized := strings.TrimSpace(key)
-		if normalized == "" {
-			continue
-		}
-		if _, exists := existingSet[normalized]; exists {
-			continue
-		}
-		existingSet[normalized] = struct{}{}
-		dedupedNewKeys = append(dedupedNewKeys, normalized)
-		addedCount++
-	}
+	dedupedNewKeys, addedCount := cleanAndDeduplicateKeys(existingKeys, newKeys)
 
 	if addedCount == 0 {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": "所有密钥都已存在，没有新密钥可添加",
+			"message": "清理后未找到有效的密钥或所有密钥都已存在",
 		})
 		return
 	}
 
-	allKeys := append(existingKeys, dedupedNewKeys...)
-	channel.Key = strings.Join(allKeys, "\n")
-	channel.ChannelInfo.MultiKeySize = len(allKeys)
-
-	if err := channel.Update(); err != nil {
+	if err := commitNewKeysToChannel(channel, existingKeys, dedupedNewKeys); err != nil {
 		common.ApiError(c, err)
 		return
 	}
 
-	model.InitChannelCache()
-	service.ResetProxyClientCache()
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": fmt.Sprintf("成功添加 %d 个密钥", addedCount),

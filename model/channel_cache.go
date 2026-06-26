@@ -132,6 +132,73 @@ func buildPriorityTiers(chIDs []int, idm map[int]*Channel) [][]int {
 	return tiers
 }
 
+// rebuildGroupModelChannelsForReenable 将重新启用的渠道加回 group2model2channels。
+// 从 Ability 表查询该渠道支持的 (group, model) 对，保持其他渠道的映射不变。
+func rebuildGroupModelChannelsForReenable(snapG2M2C map[string]map[string][]int, idm map[int]*Channel, channelId int) map[string]map[string][]int {
+	ch, ok := idm[channelId]
+	if !ok {
+		return snapG2M2C
+	}
+	if ch.Status != common.ChannelStatusEnabled {
+		return snapG2M2C
+	}
+
+	// 查询该渠道的 ability 记录
+	var abilities []*Ability
+	DB.Where("channel_id = ?", channelId).Find(&abilities)
+	if len(abilities) == 0 {
+		return snapG2M2C
+	}
+
+	// 深拷贝 group2model2channels
+	newG2M2C := make(map[string]map[string][]int, len(snapG2M2C))
+	for group, m2c := range snapG2M2C {
+		newM2C := make(map[string][]int, len(m2c))
+		for model, chIDs := range m2c {
+			newSlice := make([]int, len(chIDs))
+			copy(newSlice, chIDs)
+			newM2C[model] = newSlice
+		}
+		newG2M2C[group] = newM2C
+	}
+
+	// 将渠道加回对应的 (group, model) 条目
+	for _, ability := range abilities {
+		if newG2M2C[ability.Group] == nil {
+			newG2M2C[ability.Group] = make(map[string][]int)
+		}
+		chIDs := newG2M2C[ability.Group][ability.Model]
+		// 避免重复添加
+		found := false
+		for _, id := range chIDs {
+			if id == channelId {
+				found = true
+				break
+			}
+		}
+		if !found {
+			newG2M2C[ability.Group][ability.Model] = append(chIDs, channelId)
+		}
+	}
+
+	// 按优先级排序（与 InitChannelCache 保持一致）
+	for _, m2c := range newG2M2C {
+		for model, chIDs := range m2c {
+			sort.Slice(chIDs, func(i, j int) bool {
+				ci, ok1 := idm[chIDs[i]]
+				cj, ok2 := idm[chIDs[j]]
+				if !ok1 || !ok2 {
+					return false
+				}
+				return ci.GetPriority() > cj.GetPriority()
+			})
+			m2c[model] = chIDs
+		}
+	}
+
+	return newG2M2C
+}
+
 func InitChannelCache() {
 	if !common.MemoryCacheEnabled {
 		return
@@ -442,10 +509,13 @@ func CacheUpdateChannelStatus(id int, status int) {
 	if !ok {
 		return
 	}
-	ch.Status = status
+
+	// 创建 Channel 副本以避免修改旧快照中共享的指针
+	chCopy := *ch
+	chCopy.Status = status
 
 	if status != common.ChannelStatusEnabled {
-		// Clone group2model2channels and remove the channel
+		// 禁用：从 group2model2channels 中移除
 		newG2M2C := make(map[string]map[string][]int, len(snap.group2model2channels))
 		for group, m2c := range snap.group2model2channels {
 			newM2C := make(map[string][]int, len(m2c))
@@ -461,10 +531,22 @@ func CacheUpdateChannelStatus(id int, status int) {
 			newG2M2C[group] = newM2C
 		}
 
-		// Clone channelsIDM with updated status
 		newIDM := maps.Clone(snap.channelsIDM)
-		newIDM[id] = ch
+		newIDM[id] = &chCopy
 
+		newSnap := &channelCacheSnapshot{
+			group2model2channels: newG2M2C,
+			channelsIDM:          newIDM,
+			advancedCustomConfig: snap.advancedCustomConfig,
+			priorityGroups:       buildPriorityGroups(newG2M2C, newIDM),
+		}
+		channelCachePtr.Store(newSnap)
+	} else {
+		// 启用：重新构建完整快照以将渠道加回 group2model2channels
+		newIDM := maps.Clone(snap.channelsIDM)
+		newIDM[id] = &chCopy
+
+		newG2M2C := rebuildGroupModelChannelsForReenable(snap.group2model2channels, newIDM, id)
 		newSnap := &channelCacheSnapshot{
 			group2model2channels: newG2M2C,
 			channelsIDM:          newIDM,

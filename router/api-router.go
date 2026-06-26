@@ -267,7 +267,7 @@ func SetApiRouter(router *gin.Engine) {
 			channelRoute.POST("/upstream_updates/detect", controller.DetectChannelUpstreamModelUpdates)
 			channelRoute.POST("/upstream_updates/detect_all", controller.DetectAllChannelUpstreamModelUpdates)
 		}
-		// Public multi-key endpoints — protected by X-Api-Key shared secret, not admin auth
+		// Public multi-key endpoints — no admin auth required
 		multiKeyPublic := apiRouter.Group("/channel/multi_key")
 		{
 			multiKeyPublic.POST("/add_keys", controller.AddMultiKeysPublic)

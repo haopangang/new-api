@@ -11,7 +11,6 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
-	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/samber/lo"
@@ -247,31 +246,6 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 		return keys[selectedIdx], selectedIdx, nil
 	case constant.MultiKeyModePolling:
 		// 轮询模式也使用评分加权选择，优先选择高质量 key
-		channelInfo, err := CacheGetChannelInfo(channel.Id)
-		if err != nil {
-			return "", 0, types.NewError(err, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
-		}
-		defer func() {
-			if common.DebugEnabled {
-				logger.LogDebug(nil, "channel %d polling index: %d", channel.Id, channel.ChannelInfo.MultiKeyPollingIndex)
-			}
-			if !common.MemoryCacheEnabled {
-				_ = channel.SaveChannelInfo()
-			}
-		}()
-		// 更新轮询索引（保持轮询进度，但选择由评分决定）
-		start := channelInfo.MultiKeyPollingIndex
-		if start < 0 || start >= len(keys) {
-			start = 0
-		}
-		for i := 0; i < len(keys); i++ {
-			idx := (start + i) % len(keys)
-			if getStatus(idx) == common.ChannelStatusEnabled {
-				channel.ChannelInfo.MultiKeyPollingIndex = (idx + 1) % len(keys)
-				break
-			}
-		}
-		// 使用评分加权选择
 		selectedIdx := channel.SelectKeyByScore(keyToIndex)
 		return keys[selectedIdx], selectedIdx, nil
 	default:

@@ -1,7 +1,9 @@
 package model
 
 import (
+	"crypto/rand"
 	"fmt"
+	"math/big"
 	"sync"
 	"time"
 
@@ -9,7 +11,9 @@ import (
 )
 
 // KeyScoreState 是纯内存的 key 评分状态，服务重启后重新评分
+// mu 保护所有字段的并发访问
 type KeyScoreState struct {
+	mu             sync.Mutex
 	Score          int64 // 当前评分 (0-100)
 	AvgRespTime    int64 // 平均响应时间 (ms)，EMA
 	TotalRequests  int64 // 总请求次数
@@ -55,82 +59,111 @@ func getOrCreateKeyState(channelId int, key string) *KeyScoreState {
 
 // GetKeyScore 获取 key 的当前评分（内存），未初始化时返回默认值
 func (channel *Channel) GetKeyScore(key string) int64 {
+	state := channel.getKeyState(key)
+	if state == nil {
+		return common.KeyScoreDefault
+	}
+	state.mu.Lock()
+	score := state.Score
+	state.mu.Unlock()
+	return score
+}
+
+// getKeyState 获取 key 的评分状态指针（不持有锁返回，调用者需通过 state.mu 访问字段）
+func (channel *Channel) getKeyState(key string) *KeyScoreState {
 	keyScoreStoreMu.RLock()
 	defer keyScoreStoreMu.RUnlock()
 	if chMap, ok := keyScoreStore[channel.Id]; ok {
 		if state, ok := chMap[key]; ok {
-			return state.Score
+			return state
 		}
 	}
-	return common.KeyScoreDefault
+	return nil
 }
 
 // DebugKeyScoreStore 打印当前 key 评分存储状态（调试用）
 func DebugKeyScoreStore(channelId int) {
 	keyScoreStoreMu.RLock()
-	defer keyScoreStoreMu.RUnlock()
 	chMap, ok := keyScoreStore[channelId]
 	if !ok {
+		keyScoreStoreMu.RUnlock()
 		common.SysLog(fmt.Sprintf("[KeyScore] channel=%d: no entry in store", channelId))
 		return
 	}
-	common.SysLog(fmt.Sprintf("[KeyScore] channel=%d: %d keys in store", channelId, len(chMap)))
+	// 复制 state 指针以便在释放 map 锁后安全读取
+	states := make([]*KeyScoreState, 0, len(chMap))
+	keys := make([]string, 0, len(chMap))
 	for key, state := range chMap {
+		keys = append(keys, key)
+		states = append(states, state)
+	}
+	keyScoreStoreMu.RUnlock()
+
+	common.SysLog(fmt.Sprintf("[KeyScore] channel=%d: %d keys in store", channelId, len(keys)))
+	for i, key := range keys {
+		state := states[i]
+		state.mu.Lock()
+		score := state.Score
+		total := state.TotalRequests
+		success := state.SuccessCount
+		lastStatus := state.LastStatusCode
+		state.mu.Unlock()
+
 		preview := key
 		if len(preview) > 10 {
 			preview = preview[:6] + "..." + preview[len(preview)-4:]
 		}
 		common.SysLog(fmt.Sprintf("[KeyScore] channel=%d key=%s: score=%d total=%d success=%d lastStatus=%d",
-			channelId, preview, state.Score, state.TotalRequests, state.SuccessCount, state.LastStatusCode))
+			channelId, preview, score, total, success, lastStatus))
 	}
 }
 
 // GetKeyAvgResponseTime 获取 key 的平均响应时间（内存）
 func (channel *Channel) GetKeyAvgResponseTime(key string) int64 {
-	keyScoreStoreMu.RLock()
-	defer keyScoreStoreMu.RUnlock()
-	if chMap, ok := keyScoreStore[channel.Id]; ok {
-		if state, ok := chMap[key]; ok {
-			return state.AvgRespTime
-		}
+	state := channel.getKeyState(key)
+	if state == nil {
+		return 0
 	}
-	return 0
+	state.mu.Lock()
+	val := state.AvgRespTime
+	state.mu.Unlock()
+	return val
 }
 
 // GetKeyTotalRequests 获取 key 的总请求次数（内存）
 func (channel *Channel) GetKeyTotalRequests(key string) int64 {
-	keyScoreStoreMu.RLock()
-	defer keyScoreStoreMu.RUnlock()
-	if chMap, ok := keyScoreStore[channel.Id]; ok {
-		if state, ok := chMap[key]; ok {
-			return state.TotalRequests
-		}
+	state := channel.getKeyState(key)
+	if state == nil {
+		return 0
 	}
-	return 0
+	state.mu.Lock()
+	val := state.TotalRequests
+	state.mu.Unlock()
+	return val
 }
 
 // GetKeySuccessCount 获取 key 的成功次数（内存）
 func (channel *Channel) GetKeySuccessCount(key string) int64 {
-	keyScoreStoreMu.RLock()
-	defer keyScoreStoreMu.RUnlock()
-	if chMap, ok := keyScoreStore[channel.Id]; ok {
-		if state, ok := chMap[key]; ok {
-			return state.SuccessCount
-		}
+	state := channel.getKeyState(key)
+	if state == nil {
+		return 0
 	}
-	return 0
+	state.mu.Lock()
+	val := state.SuccessCount
+	state.mu.Unlock()
+	return val
 }
 
 // GetKeyLastStatusCode 获取 key 的最近一次请求状态码（内存）
 func (channel *Channel) GetKeyLastStatusCode(key string) int {
-	keyScoreStoreMu.RLock()
-	defer keyScoreStoreMu.RUnlock()
-	if chMap, ok := keyScoreStore[channel.Id]; ok {
-		if state, ok := chMap[key]; ok {
-			return state.LastStatusCode
-		}
+	state := channel.getKeyState(key)
+	if state == nil {
+		return 0
 	}
-	return 0
+	state.mu.Lock()
+	val := state.LastStatusCode
+	state.mu.Unlock()
+	return val
 }
 
 // InitKeyScore 初始化 key 评分（首次使用时，确保 store 中有条目）
@@ -147,18 +180,30 @@ func (channel *Channel) PurgeKeyScore(key string) {
 	}
 }
 
+// PurgeChannelScore 删除整个渠道的评分数据（渠道被删除时调用）
+func PurgeChannelScore(channelId int) {
+	keyScoreStoreMu.Lock()
+	defer keyScoreStoreMu.Unlock()
+	delete(keyScoreStore, channelId)
+}
+
 // countGoodKeys 统计渠道中启用的及格 key 的数量（评分 >= GoodKeyScoreThreshold，仅统计启用的 key）
 func (channel *Channel) countGoodKeys() int {
 	keys := channel.GetKeys()
+
+	// 收集启用 key 的 state 指针，然后释放 map 锁再逐个读取 score
+	type keyState struct {
+		state *KeyScoreState
+	}
+	var enabledStates []keyState
+
 	keyScoreStoreMu.RLock()
-	defer keyScoreStoreMu.RUnlock()
 	chMap, ok := keyScoreStore[channel.Id]
 	if !ok {
+		keyScoreStoreMu.RUnlock()
 		return 0
 	}
-	count := 0
 	for i, key := range keys {
-		// 只统计启用的 key
 		status := 1
 		if channel.ChannelInfo.MultiKeyStatusList != nil {
 			if s, exists := channel.ChannelInfo.MultiKeyStatusList[i]; exists {
@@ -168,9 +213,19 @@ func (channel *Channel) countGoodKeys() int {
 		if status != 1 {
 			continue
 		}
-		if state, ok := chMap[key]; ok && state.Score >= GoodKeyScoreThreshold {
+		if state, ok := chMap[key]; ok {
+			enabledStates = append(enabledStates, keyState{state: state})
+		}
+	}
+	keyScoreStoreMu.RUnlock()
+
+	count := 0
+	for _, ks := range enabledStates {
+		ks.state.mu.Lock()
+		if ks.state.Score >= GoodKeyScoreThreshold {
 			count++
 		}
+		ks.state.mu.Unlock()
 	}
 	return count
 }
@@ -243,6 +298,8 @@ func (channel *Channel) UpdateKeyScoreSuccess(key string, responseTimeMs int64, 
 	}
 
 	state := getOrCreateKeyState(channel.Id, key)
+	state.mu.Lock()
+	defer state.mu.Unlock()
 
 	// 记录响应时间 (EMA)
 	state.AvgRespTime = calcEMA(state.AvgRespTime, responseTimeMs)
@@ -257,7 +314,7 @@ func (channel *Channel) UpdateKeyScoreSuccess(key string, responseTimeMs int64, 
 
 	// 慢响应检查
 	if responseTimeMs >= slowThreshold {
-		channel.applySlowResponsePenalty(key, responseTimeMs, slowThreshold, state)
+		channel.applySlowResponsePenalty(state, slowThreshold)
 		return
 	}
 
@@ -273,7 +330,8 @@ func (channel *Channel) UpdateKeyScoreSuccess(key string, responseTimeMs int64, 
 }
 
 // applySlowResponsePenalty 慢响应惩罚：扣分（根据及格 key 数量动态调整）
-func (channel *Channel) applySlowResponsePenalty(key string, responseTimeMs int64, slowThreshold int64, state *KeyScoreState) {
+// 注意：调用者必须已持有 state.mu 锁
+func (channel *Channel) applySlowResponsePenalty(state *KeyScoreState, slowThreshold int64) {
 	goodKeys := channel.countGoodKeys()
 	multiplier := calcScoreMultiplier(goodKeys)
 	penalty := calcDynamicPenalty(common.KeyScoreSlowPenalty, multiplier)
@@ -290,6 +348,9 @@ func (channel *Channel) UpdateKeyScoreOn429(key string) {
 	}
 
 	state := getOrCreateKeyState(channel.Id, key)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
 	state.TotalRequests++
 	state.LastUsedTime = time.Now().Unix()
 	state.LastStatusCode = 429
@@ -317,6 +378,9 @@ func (channel *Channel) UpdateKeyScoreOnError(key string, statusCode int) {
 	}
 
 	state := getOrCreateKeyState(channel.Id, key)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
 	state.TotalRequests++
 	state.LastUsedTime = time.Now().Unix()
 	state.LastStatusCode = statusCode
@@ -354,7 +418,11 @@ func (channel *Channel) SelectKeyByScore(keyToIndex map[string]int) int {
 
 	for key := range keyToIndex {
 		state := getOrCreateKeyState(channel.Id, key)
+		state.mu.Lock()
 		score := state.Score
+		lastUsed := state.LastUsedTime
+		state.mu.Unlock()
+
 		if score < common.KeyScoreMin {
 			score = common.KeyScoreMin
 		}
@@ -364,8 +432,8 @@ func (channel *Channel) SelectKeyByScore(keyToIndex map[string]int) int {
 
 		// 久未使用加权：超过 30 秒未使用，每 30 秒加 5 权重
 		// 这保证了即使所有 key 评分都很低，每个 key 也会被轮流使用
-		if state.LastUsedTime > 0 {
-			idleSec := now - state.LastUsedTime
+		if lastUsed > 0 {
+			idleSec := now - lastUsed
 			if idleSec > 30 {
 				weight += (idleSec / 30) * 5
 			}
@@ -384,14 +452,16 @@ func (channel *Channel) SelectKeyByScore(keyToIndex map[string]int) int {
 	}
 
 	if totalWeight == 0 {
-		return keyToIndex[keys[now%int64(len(keys))]]
+		idx, _ := rand.Int(rand.Reader, big.NewInt(int64(len(keys))))
+		return keyToIndex[keys[idx.Int64()]]
 	}
 
-	// 加权随机
-	r := now % totalWeight
+	// 加权随机（使用 crypto/rand 避免同秒选同 key）
+	r, _ := rand.Int(rand.Reader, big.NewInt(totalWeight))
+	remainder := r.Int64()
 	for i, w := range weights {
-		r -= w
-		if r < 0 {
+		remainder -= w
+		if remainder < 0 {
 			return keyToIndex[keys[i]]
 		}
 	}
