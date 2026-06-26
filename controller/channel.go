@@ -1339,12 +1339,12 @@ type KeyStatus struct {
 	Status         int    `json:"status"` // 1: enabled, 2: manual disabled, 3: auto disabled
 	DisabledTime   int64  `json:"disabled_time,omitempty"`
 	Reason         string `json:"reason,omitempty"`
-	KeyPreview     string `json:"key_preview"`                // first 10 chars of key for identification
-	Score          int64  `json:"score,omitempty"`            // key quality score (0-100)
-	AvgResponseTime int64 `json:"avg_response_time,omitempty"` // average response time in ms
-	TotalRequests  int64  `json:"total_requests,omitempty"`   // total requests count
-	SuccessCount   int64  `json:"success_count,omitempty"`    // successful requests count
-	LastStatusCode int    `json:"last_status_code,omitempty"` // last request HTTP status code
+	KeyPreview     string `json:"key_preview"`           // first 10 chars of key for identification
+	Score          int64  `json:"score"`                  // key quality score (0-100)
+	AvgResponseTime int64 `json:"avg_response_time"`     // average response time in ms
+	TotalRequests  int64  `json:"total_requests"`         // total requests count
+	SuccessCount   int64  `json:"success_count"`          // successful requests count
+	LastStatusCode int    `json:"last_status_code"`       // last request HTTP status code
 }
 
 // cleanKey removes special characters and attempts base64 decoding
