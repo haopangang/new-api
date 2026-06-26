@@ -221,6 +221,7 @@ export interface KeyStatus {
   avg_response_time?: number
   total_requests?: number
   success_count?: number
+  last_status_code?: number
 }
 
 export type MultiKeyConfirmAction = {

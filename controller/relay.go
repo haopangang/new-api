@@ -225,13 +225,13 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			relayInfo.LastError = nil
 			// 成功时更新评分
 			if channel.ChannelInfo.IsMultiKey {
-				keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
-				if keyIndex >= 0 {
+				apiKey := common.GetContextKeyString(c, constant.ContextKeyChannelKey)
+				if apiKey != "" {
 					startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
 					if !startTime.IsZero() {
 						responseTimeMs := time.Since(startTime).Milliseconds()
 						estimatedTokens := relayInfo.GetEstimatePromptTokens()
-						channel.UpdateKeyScoreSuccess(keyIndex, responseTimeMs, estimatedTokens)
+						channel.UpdateKeyScoreSuccess(apiKey, responseTimeMs, estimatedTokens)
 					}
 				}
 			}
@@ -243,9 +243,17 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		// 429 错误：评分扣分
 		if newAPIError.StatusCode == http.StatusTooManyRequests && channel.ChannelInfo.IsMultiKey {
-			keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
-			if keyIndex >= 0 {
-				channel.UpdateKeyScoreOn429(keyIndex)
+			apiKey := common.GetContextKeyString(c, constant.ContextKeyChannelKey)
+			if apiKey != "" {
+				channel.UpdateKeyScoreOn429(apiKey)
+			}
+		}
+
+		// 服务端错误（500/502/503/504）：评分扣分
+		if isServerError(newAPIError.StatusCode) && channel.ChannelInfo.IsMultiKey {
+			apiKey := common.GetContextKeyString(c, constant.ContextKeyChannelKey)
+			if apiKey != "" {
+				channel.UpdateKeyScoreOnError(apiKey, newAPIError.StatusCode)
 			}
 		}
 
@@ -421,6 +429,13 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 
 }
 
+func isServerError(statusCode int) bool {
+	return statusCode == http.StatusInternalServerError ||
+		statusCode == http.StatusBadGateway ||
+		statusCode == http.StatusServiceUnavailable ||
+		statusCode == http.StatusGatewayTimeout
+}
+
 func RelayMidjourney(c *gin.Context) {
 	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatMjProxy, nil, nil)
 
@@ -572,12 +587,12 @@ func RelayTask(c *gin.Context) {
 		if taskErr == nil {
 			// 成功时更新评分
 			if channel.ChannelInfo.IsMultiKey {
-				keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
-				if keyIndex >= 0 {
+				apiKey := common.GetContextKeyString(c, constant.ContextKeyChannelKey)
+				if apiKey != "" {
 					startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
 					if !startTime.IsZero() {
 						responseTimeMs := time.Since(startTime).Milliseconds()
-						channel.UpdateKeyScoreSuccess(keyIndex, responseTimeMs, 0)
+						channel.UpdateKeyScoreSuccess(apiKey, responseTimeMs, 0)
 					}
 				}
 			}
@@ -593,9 +608,17 @@ func RelayTask(c *gin.Context) {
 
 		// 429 错误：评分扣分
 		if taskErr.StatusCode == http.StatusTooManyRequests && channel.ChannelInfo.IsMultiKey {
-			keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
-			if keyIndex >= 0 {
-				channel.UpdateKeyScoreOn429(keyIndex)
+			apiKey := common.GetContextKeyString(c, constant.ContextKeyChannelKey)
+			if apiKey != "" {
+				channel.UpdateKeyScoreOn429(apiKey)
+			}
+		}
+
+		// 服务端错误（500/502/503/504）：评分扣分
+		if isServerError(taskErr.StatusCode) && channel.ChannelInfo.IsMultiKey {
+			apiKey := common.GetContextKeyString(c, constant.ContextKeyChannelKey)
+			if apiKey != "" {
+				channel.UpdateKeyScoreOnError(apiKey, taskErr.StatusCode)
 			}
 		}
 

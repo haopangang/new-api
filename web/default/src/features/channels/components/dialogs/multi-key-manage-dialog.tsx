@@ -246,7 +246,7 @@ export function MultiKeyManageDialog({
         description={t(
           'Manage multi-key status and configuration for this channel'
         )}
-        contentClassName='flex max-h-[90vh] max-w-5xl flex-col'
+        contentClassName='flex max-h-[90vh] max-w-[90vw] min-w-[1000px] flex-col'
         titleClassName='flex items-center gap-2'
         contentHeight='min(72vh, 720px)'
         bodyClassName='space-y-4'
@@ -436,6 +436,25 @@ export function MultiKeyManageDialog({
                           </span>
                         </span>
                       )
+                    },
+                  },
+                  {
+                    id: 'last-status-code',
+                    header: t('Last Status'),
+                    className: 'w-24',
+                    cellClassName: 'font-mono text-sm text-center',
+                    cell: (key) => {
+                      const code = key.last_status_code
+                      if (!code || code === 0) return '-'
+                      const color =
+                        code >= 200 && code < 300
+                          ? 'text-green-600'
+                          : code === 429
+                            ? 'text-yellow-600'
+                            : code >= 500
+                              ? 'text-red-600'
+                              : 'text-muted-foreground'
+                      return <span className={color}>{code}</span>
                     },
                   },
                   {

@@ -1344,6 +1344,7 @@ type KeyStatus struct {
 	AvgResponseTime int64 `json:"avg_response_time,omitempty"` // average response time in ms
 	TotalRequests  int64  `json:"total_requests,omitempty"`   // total requests count
 	SuccessCount   int64  `json:"success_count,omitempty"`    // successful requests count
+	LastStatusCode int    `json:"last_status_code,omitempty"` // last request HTTP status code
 }
 
 // cleanKey removes special characters and attempts base64 decoding
@@ -1483,6 +1484,7 @@ func ManageMultiKeys(c *gin.Context) {
 	switch request.Action {
 	case "get_key_status":
 		keys := channel.GetKeys()
+		model.DebugKeyScoreStore(channel.Id)
 
 		// Default pagination parameters
 		page := request.Page
@@ -1519,8 +1521,8 @@ func ManageMultiKeys(c *gin.Context) {
 			case 3:
 				autoDisabledCount++
 			}
-			// Count good keys (score >= threshold)
-			if channel.GetKeyScore(i) >= model.GoodKeyScoreThreshold {
+			// Count good keys (enabled keys with score >= threshold)
+			if status == 1 && channel.GetKeyScore(key) >= model.GoodKeyScoreThreshold {
 				goodKeyCount++
 			}
 
@@ -1545,10 +1547,11 @@ func ManageMultiKeys(c *gin.Context) {
 				DisabledTime:    disabledTime,
 				Reason:          reason,
 				KeyPreview:      keyPreview,
-				Score:           channel.GetKeyScore(i),
-				AvgResponseTime: channel.GetKeyAvgResponseTime(i),
-				TotalRequests:   channel.GetKeyTotalRequests(i),
-				SuccessCount:    channel.GetKeySuccessCount(i),
+				Score:           channel.GetKeyScore(key),
+				AvgResponseTime: channel.GetKeyAvgResponseTime(key),
+				TotalRequests:   channel.GetKeyTotalRequests(key),
+				SuccessCount:    channel.GetKeySuccessCount(key),
+				LastStatusCode:  channel.GetKeyLastStatusCode(key),
 			})
 		}
 
@@ -1556,7 +1559,12 @@ func ManageMultiKeys(c *gin.Context) {
 		var filteredKeyStatusList []KeyStatus
 		if request.Status != nil {
 			for _, keyStatus := range allKeyStatusList {
-				if keyStatus.Status == *request.Status {
+				if *request.Status == 4 {
+					// Good Keys: enabled keys with score >= threshold
+					if keyStatus.Status == 1 && keyStatus.Score >= model.GoodKeyScoreThreshold {
+						filteredKeyStatusList = append(filteredKeyStatusList, keyStatus)
+					}
+				} else if keyStatus.Status == *request.Status {
 					filteredKeyStatusList = append(filteredKeyStatusList, keyStatus)
 				}
 			}
@@ -1793,6 +1801,7 @@ func ManageMultiKeys(c *gin.Context) {
 		for i, key := range keys {
 			// 跳过要删除的密钥
 			if i == keyIndex {
+				channel.PurgeKeyScore(key)
 				continue
 			}
 
@@ -1865,6 +1874,7 @@ func ManageMultiKeys(c *gin.Context) {
 			// 只删除自动禁用（status == 3）的密钥，保留启用（status == 1）和手动禁用（status == 2）的密钥
 			if status == 3 {
 				deletedCount++
+				channel.PurgeKeyScore(key)
 			} else {
 				remainingKeys = append(remainingKeys, key)
 				// 保留非自动禁用密钥的状态信息，重新索引

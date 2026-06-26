@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -9,27 +10,28 @@ import (
 
 // KeyScoreState 是纯内存的 key 评分状态，服务重启后重新评分
 type KeyScoreState struct {
-	Score         int64 // 当前评分 (0-100)
-	AvgRespTime   int64 // 平均响应时间 (ms)，EMA
-	TotalRequests int64 // 总请求次数
-	SuccessCount  int64 // 成功次数
-	LastUsedTime  int64 // 上次使用时间 (Unix秒)，用于保证所有 key 都有机会
+	Score          int64 // 当前评分 (0-100)
+	AvgRespTime    int64 // 平均响应时间 (ms)，EMA
+	TotalRequests  int64 // 总请求次数
+	SuccessCount   int64 // 成功次数
+	LastUsedTime   int64 // 上次使用时间 (Unix秒)，用于保证所有 key 都有机会
+	LastStatusCode int   // 最近一次请求的 HTTP 状态码（0 表示无记录）
 }
 
 // GoodKeyScoreThreshold 评分 >= 此值的 key 视为"及格"（初始分 50，只有保持或恢复到初始水平才算及格）
 const GoodKeyScoreThreshold int64 = 50
 
 var (
-	keyScoreStore   = make(map[int]map[int]*KeyScoreState) // channelId -> keyIndex -> state
+	keyScoreStore   = make(map[int]map[string]*KeyScoreState) // channelId -> apiKey -> state
 	keyScoreStoreMu sync.RWMutex
 )
 
 // getOrCreateKeyState 获取或创建 key 的评分状态（纯内存）
-func getOrCreateKeyState(channelId, keyIndex int) *KeyScoreState {
+func getOrCreateKeyState(channelId int, key string) *KeyScoreState {
 	// 读锁快速路径
 	keyScoreStoreMu.RLock()
 	if chMap, ok := keyScoreStore[channelId]; ok {
-		if state, ok := chMap[keyIndex]; ok {
+		if state, ok := chMap[key]; ok {
 			keyScoreStoreMu.RUnlock()
 			return state
 		}
@@ -40,35 +42,55 @@ func getOrCreateKeyState(channelId, keyIndex int) *KeyScoreState {
 	keyScoreStoreMu.Lock()
 	defer keyScoreStoreMu.Unlock()
 	if chMap, ok := keyScoreStore[channelId]; ok {
-		if state, ok := chMap[keyIndex]; ok {
+		if state, ok := chMap[key]; ok {
 			return state
 		}
 	} else {
-		keyScoreStore[channelId] = make(map[int]*KeyScoreState)
+		keyScoreStore[channelId] = make(map[string]*KeyScoreState)
 	}
 	state := &KeyScoreState{Score: common.KeyScoreDefault}
-	keyScoreStore[channelId][keyIndex] = state
+	keyScoreStore[channelId][key] = state
 	return state
 }
 
 // GetKeyScore 获取 key 的当前评分（内存），未初始化时返回默认值
-func (channel *Channel) GetKeyScore(keyIndex int) int64 {
+func (channel *Channel) GetKeyScore(key string) int64 {
 	keyScoreStoreMu.RLock()
 	defer keyScoreStoreMu.RUnlock()
 	if chMap, ok := keyScoreStore[channel.Id]; ok {
-		if state, ok := chMap[keyIndex]; ok {
+		if state, ok := chMap[key]; ok {
 			return state.Score
 		}
 	}
 	return common.KeyScoreDefault
 }
 
+// DebugKeyScoreStore 打印当前 key 评分存储状态（调试用）
+func DebugKeyScoreStore(channelId int) {
+	keyScoreStoreMu.RLock()
+	defer keyScoreStoreMu.RUnlock()
+	chMap, ok := keyScoreStore[channelId]
+	if !ok {
+		common.SysLog(fmt.Sprintf("[KeyScore] channel=%d: no entry in store", channelId))
+		return
+	}
+	common.SysLog(fmt.Sprintf("[KeyScore] channel=%d: %d keys in store", channelId, len(chMap)))
+	for key, state := range chMap {
+		preview := key
+		if len(preview) > 10 {
+			preview = preview[:6] + "..." + preview[len(preview)-4:]
+		}
+		common.SysLog(fmt.Sprintf("[KeyScore] channel=%d key=%s: score=%d total=%d success=%d lastStatus=%d",
+			channelId, preview, state.Score, state.TotalRequests, state.SuccessCount, state.LastStatusCode))
+	}
+}
+
 // GetKeyAvgResponseTime 获取 key 的平均响应时间（内存）
-func (channel *Channel) GetKeyAvgResponseTime(keyIndex int) int64 {
+func (channel *Channel) GetKeyAvgResponseTime(key string) int64 {
 	keyScoreStoreMu.RLock()
 	defer keyScoreStoreMu.RUnlock()
 	if chMap, ok := keyScoreStore[channel.Id]; ok {
-		if state, ok := chMap[keyIndex]; ok {
+		if state, ok := chMap[key]; ok {
 			return state.AvgRespTime
 		}
 	}
@@ -76,11 +98,11 @@ func (channel *Channel) GetKeyAvgResponseTime(keyIndex int) int64 {
 }
 
 // GetKeyTotalRequests 获取 key 的总请求次数（内存）
-func (channel *Channel) GetKeyTotalRequests(keyIndex int) int64 {
+func (channel *Channel) GetKeyTotalRequests(key string) int64 {
 	keyScoreStoreMu.RLock()
 	defer keyScoreStoreMu.RUnlock()
 	if chMap, ok := keyScoreStore[channel.Id]; ok {
-		if state, ok := chMap[keyIndex]; ok {
+		if state, ok := chMap[key]; ok {
 			return state.TotalRequests
 		}
 	}
@@ -88,24 +110,46 @@ func (channel *Channel) GetKeyTotalRequests(keyIndex int) int64 {
 }
 
 // GetKeySuccessCount 获取 key 的成功次数（内存）
-func (channel *Channel) GetKeySuccessCount(keyIndex int) int64 {
+func (channel *Channel) GetKeySuccessCount(key string) int64 {
 	keyScoreStoreMu.RLock()
 	defer keyScoreStoreMu.RUnlock()
 	if chMap, ok := keyScoreStore[channel.Id]; ok {
-		if state, ok := chMap[keyIndex]; ok {
+		if state, ok := chMap[key]; ok {
 			return state.SuccessCount
 		}
 	}
 	return 0
 }
 
-// InitKeyScore 初始化 key 评分（首次使用时，确保 store 中有条目）
-func (channel *Channel) InitKeyScore(keyIndex int) {
-	_ = getOrCreateKeyState(channel.Id, keyIndex)
+// GetKeyLastStatusCode 获取 key 的最近一次请求状态码（内存）
+func (channel *Channel) GetKeyLastStatusCode(key string) int {
+	keyScoreStoreMu.RLock()
+	defer keyScoreStoreMu.RUnlock()
+	if chMap, ok := keyScoreStore[channel.Id]; ok {
+		if state, ok := chMap[key]; ok {
+			return state.LastStatusCode
+		}
+	}
+	return 0
 }
 
-// countGoodKeys 统计渠道中及格 key 的数量（评分 >= GoodKeyScoreThreshold）
+// InitKeyScore 初始化 key 评分（首次使用时，确保 store 中有条目）
+func (channel *Channel) InitKeyScore(key string) {
+	_ = getOrCreateKeyState(channel.Id, key)
+}
+
+// PurgeKeyScore 删除指定 key 的评分数据（key 被删除时调用）
+func (channel *Channel) PurgeKeyScore(key string) {
+	keyScoreStoreMu.Lock()
+	defer keyScoreStoreMu.Unlock()
+	if chMap, ok := keyScoreStore[channel.Id]; ok {
+		delete(chMap, key)
+	}
+}
+
+// countGoodKeys 统计渠道中启用的及格 key 的数量（评分 >= GoodKeyScoreThreshold，仅统计启用的 key）
 func (channel *Channel) countGoodKeys() int {
+	keys := channel.GetKeys()
 	keyScoreStoreMu.RLock()
 	defer keyScoreStoreMu.RUnlock()
 	chMap, ok := keyScoreStore[channel.Id]
@@ -113,8 +157,18 @@ func (channel *Channel) countGoodKeys() int {
 		return 0
 	}
 	count := 0
-	for _, state := range chMap {
-		if state.Score >= GoodKeyScoreThreshold {
+	for i, key := range keys {
+		// 只统计启用的 key
+		status := 1
+		if channel.ChannelInfo.MultiKeyStatusList != nil {
+			if s, exists := channel.ChannelInfo.MultiKeyStatusList[i]; exists {
+				status = s
+			}
+		}
+		if status != 1 {
+			continue
+		}
+		if state, ok := chMap[key]; ok && state.Score >= GoodKeyScoreThreshold {
 			count++
 		}
 	}
@@ -183,12 +237,12 @@ func CalcDynamicSlowThreshold(estimatedTokens int) int64 {
 // UpdateKeyScoreSuccess 成功请求时更新评分
 // 记录响应时间，根据速度加分，慢响应触发扣分和冷却
 // estimatedTokens 用于计算动态慢响应阈值
-func (channel *Channel) UpdateKeyScoreSuccess(keyIndex int, responseTimeMs int64, estimatedTokens int) {
+func (channel *Channel) UpdateKeyScoreSuccess(key string, responseTimeMs int64, estimatedTokens int) {
 	if !channel.ChannelInfo.IsMultiKey {
 		return
 	}
 
-	state := getOrCreateKeyState(channel.Id, keyIndex)
+	state := getOrCreateKeyState(channel.Id, key)
 
 	// 记录响应时间 (EMA)
 	state.AvgRespTime = calcEMA(state.AvgRespTime, responseTimeMs)
@@ -196,13 +250,14 @@ func (channel *Channel) UpdateKeyScoreSuccess(keyIndex int, responseTimeMs int64
 	// 总请求次数+1
 	state.TotalRequests++
 	state.LastUsedTime = time.Now().Unix()
+	state.LastStatusCode = 200
 
 	// 动态慢响应阈值
 	slowThreshold := CalcDynamicSlowThreshold(estimatedTokens)
 
 	// 慢响应检查
 	if responseTimeMs >= slowThreshold {
-		channel.applySlowResponsePenalty(keyIndex, responseTimeMs, slowThreshold, state)
+		channel.applySlowResponsePenalty(key, responseTimeMs, slowThreshold, state)
 		return
 	}
 
@@ -218,7 +273,7 @@ func (channel *Channel) UpdateKeyScoreSuccess(keyIndex int, responseTimeMs int64
 }
 
 // applySlowResponsePenalty 慢响应惩罚：扣分（根据及格 key 数量动态调整）
-func (channel *Channel) applySlowResponsePenalty(keyIndex int, responseTimeMs int64, slowThreshold int64, state *KeyScoreState) {
+func (channel *Channel) applySlowResponsePenalty(key string, responseTimeMs int64, slowThreshold int64, state *KeyScoreState) {
 	goodKeys := channel.countGoodKeys()
 	multiplier := calcScoreMultiplier(goodKeys)
 	penalty := calcDynamicPenalty(common.KeyScoreSlowPenalty, multiplier)
@@ -229,41 +284,76 @@ func (channel *Channel) applySlowResponsePenalty(keyIndex int, responseTimeMs in
 }
 
 // UpdateKeyScoreOn429 429 错误时扣分（根据及格 key 数量动态调整）
-func (channel *Channel) UpdateKeyScoreOn429(keyIndex int) {
+func (channel *Channel) UpdateKeyScoreOn429(key string) {
 	if !channel.ChannelInfo.IsMultiKey {
 		return
 	}
 
-	state := getOrCreateKeyState(channel.Id, keyIndex)
+	state := getOrCreateKeyState(channel.Id, key)
 	state.TotalRequests++
 	state.LastUsedTime = time.Now().Unix()
+	state.LastStatusCode = 429
 
 	goodKeys := channel.countGoodKeys()
 	multiplier := calcScoreMultiplier(goodKeys)
 	penalty := calcDynamicPenalty(common.KeyScore429Penalty, multiplier)
+	oldScore := state.Score
 	state.Score -= penalty
 	if state.Score < common.KeyScoreMin {
 		state.Score = common.KeyScoreMin
 	}
+	preview := key
+	if len(preview) > 10 {
+		preview = preview[:6] + "..." + preview[len(preview)-4:]
+	}
+	common.SysLog(fmt.Sprintf("[KeyScore] channel=%d key=%s score: %d -> %d (penalty=%d, goodKeys=%d, multiplier=%.2f)",
+		channel.Id, preview, oldScore, state.Score, penalty, goodKeys, multiplier))
+}
+
+// UpdateKeyScoreOnError 服务端错误时扣分（500/502/503/504，根据及格 key 数量动态调整）
+func (channel *Channel) UpdateKeyScoreOnError(key string, statusCode int) {
+	if !channel.ChannelInfo.IsMultiKey {
+		return
+	}
+
+	state := getOrCreateKeyState(channel.Id, key)
+	state.TotalRequests++
+	state.LastUsedTime = time.Now().Unix()
+	state.LastStatusCode = statusCode
+
+	goodKeys := channel.countGoodKeys()
+	multiplier := calcScoreMultiplier(goodKeys)
+	penalty := calcDynamicPenalty(common.KeyScoreErrorPenalty, multiplier)
+	oldScore := state.Score
+	state.Score -= penalty
+	if state.Score < common.KeyScoreMin {
+		state.Score = common.KeyScoreMin
+	}
+	preview := key
+	if len(preview) > 10 {
+		preview = preview[:6] + "..." + preview[len(preview)-4:]
+	}
+	common.SysLog(fmt.Sprintf("[KeyScore] channel=%d key=%s score: %d -> %d (error %d, penalty=%d, goodKeys=%d, multiplier=%.2f)",
+		channel.Id, preview, oldScore, state.Score, statusCode, penalty, goodKeys, multiplier))
 }
 
 // SelectKeyByScore 基于评分的加权随机选择
 // 保证所有 key 都有机会被选中：评分高的优先，但低分 key 也有最低保障
 // 通过 LastUsedTime 追加"久未使用"加权，确保不会有任何 key 被饿死
-func (channel *Channel) SelectKeyByScore(candidates []int) int {
-	if len(candidates) == 0 {
+// 参数: keyToIndex = key string -> index 映射
+// 返回: 被选中 key 的 index
+func (channel *Channel) SelectKeyByScore(keyToIndex map[string]int) int {
+	if len(keyToIndex) == 0 {
 		return 0
-	}
-	if len(candidates) == 1 {
-		return candidates[0]
 	}
 
 	now := time.Now().Unix()
 	var totalWeight int64
-	weights := make([]int64, len(candidates))
+	keys := make([]string, 0, len(keyToIndex))
+	weights := make([]int64, 0, len(keyToIndex))
 
-	for i, idx := range candidates {
-		state := getOrCreateKeyState(channel.Id, idx)
+	for key := range keyToIndex {
+		state := getOrCreateKeyState(channel.Id, key)
 		score := state.Score
 		if score < common.KeyScoreMin {
 			score = common.KeyScoreMin
@@ -284,12 +374,17 @@ func (channel *Channel) SelectKeyByScore(candidates []int) int {
 			weight += 20
 		}
 
-		weights[i] = weight
+		keys = append(keys, key)
+		weights = append(weights, weight)
 		totalWeight += weight
 	}
 
+	if len(keys) == 1 {
+		return keyToIndex[keys[0]]
+	}
+
 	if totalWeight == 0 {
-		return candidates[now%int64(len(candidates))]
+		return keyToIndex[keys[now%int64(len(keys))]]
 	}
 
 	// 加权随机
@@ -297,10 +392,10 @@ func (channel *Channel) SelectKeyByScore(candidates []int) int {
 	for i, w := range weights {
 		r -= w
 		if r < 0 {
-			return candidates[i]
+			return keyToIndex[keys[i]]
 		}
 	}
-	return candidates[len(candidates)-1]
+	return keyToIndex[keys[len(keys)-1]]
 }
 
 // calcEMA 计算指数移动平均

@@ -204,6 +204,7 @@ export const ADD_MODE_OPTIONS = [
 export const MULTI_KEY_FILTER_OPTIONS = [
   { value: 'all', label: 'All Status' },
   { value: '1', label: 'Enabled' },
+  { value: '4', label: 'Good Keys' },
   { value: '2', label: 'Manual Disabled' },
   { value: '3', label: 'Auto Disabled' },
 ] as const

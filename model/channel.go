@@ -226,24 +226,24 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 		return common.ChannelStatusEnabled
 	}
 
-	// Collect indexes of enabled keys, initialize scores for new keys
-	enabledIdx := make([]int, 0, len(keys))
-	for i := range keys {
+	// Collect enabled keys, initialize scores for new keys
+	keyToIndex := make(map[string]int, len(keys))
+	for i, key := range keys {
 		// 初始化新 key 的评分
-		channel.InitKeyScore(i)
+		channel.InitKeyScore(key)
 		if getStatus(i) == common.ChannelStatusEnabled {
-			enabledIdx = append(enabledIdx, i)
+			keyToIndex[key] = i
 		}
 	}
 
-	if len(enabledIdx) == 0 {
+	if len(keyToIndex) == 0 {
 		return "", 0, types.NewError(errors.New("no enabled keys"), types.ErrorCodeChannelNoAvailableKey)
 	}
 
 	switch channel.ChannelInfo.MultiKeyMode {
 	case constant.MultiKeyModeRandom:
 		// 基于评分的加权随机选择，评分高的 key 被选中概率更大
-		selectedIdx := channel.SelectKeyByScore(enabledIdx)
+		selectedIdx := channel.SelectKeyByScore(keyToIndex)
 		return keys[selectedIdx], selectedIdx, nil
 	case constant.MultiKeyModePolling:
 		// 轮询模式也使用评分加权选择，优先选择高质量 key
@@ -272,10 +272,10 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 			}
 		}
 		// 使用评分加权选择
-		selectedIdx := channel.SelectKeyByScore(enabledIdx)
+		selectedIdx := channel.SelectKeyByScore(keyToIndex)
 		return keys[selectedIdx], selectedIdx, nil
 	default:
-		selectedIdx := channel.SelectKeyByScore(enabledIdx)
+		selectedIdx := channel.SelectKeyByScore(keyToIndex)
 		return keys[selectedIdx], selectedIdx, nil
 	}
 }
