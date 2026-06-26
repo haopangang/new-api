@@ -11,6 +11,7 @@ logs
 web/default/dist
 web/classic/dist
 web/node_modules
+scripts/node_modules
 web/dist
 .env
 one-api
